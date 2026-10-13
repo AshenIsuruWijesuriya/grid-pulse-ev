@@ -1,0 +1,8 @@
+{
+  "project_id": "J26-DS-331",
+  "individual_component": "Optimizing Public EV Charging Schedules for Renewable-Curtailment Absorption and Peak Reduction in Sri Lanka",
+  "time_zone": "Asia/Colombo",
+  "initial_data_target": "12 months, hourly or half-hourly, official time-aligned demand and generation by source",
+  "observed_vs_available_renewables": "distinct data concepts",
+  "status": "Stage 1 - data feasibility, no measured CEB data loaded"
+}
