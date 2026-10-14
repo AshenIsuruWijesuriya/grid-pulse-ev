@@ -20,3 +20,26 @@
 
 ### Decisions and evidence
 Fill in after each meeting or experiment: Date | Decision | Evidence | Impact | Supervisor approval (if relevant).
+
+## 2026-10-14 — PUCSL Dispatch Data Preprocessing
+
+**Activity:** Developed and tested a reusable Python
+preprocessing module for PUCSL 15-minute electricity
+dispatch data.
+
+**Dataset:** January 2025 PUCSL dispatch workbook.
+
+**Results:**
+- Processed 31 daily worksheets.
+- Extracted 2,976 quarter-hour observations.
+- Generated normalized dispatch and reconciliation CSVs.
+- Flagged 30 negative generation observations.
+- Successfully passed 11 automated project tests.
+
+**Limitations:**
+- Daily energy reconciliation discrepancy remains unresolved.
+- Reported dispatch is not yet verified as national demand.
+- Negative observations require further investigation.
+
+**Next task:** Process additional monthly PUCSL workbooks
+and investigate the reporting discrepancies.
