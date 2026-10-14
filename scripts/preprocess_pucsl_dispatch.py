@@ -61,6 +61,7 @@ FIELDNAMES = (
     'interval_start_local', 'interval_end_local', 'source_time_label',
     *SOURCES, 'total_dispatch_reported_mw',
     'sum_generation_by_source_mw', 'dispatch_balance_difference_mw',
+    'interval_quality_status', 'interval_quality_flags',
 )
 RECON_FIELDS = (
     'operating_date', 'source_sheet',
@@ -71,6 +72,7 @@ RECON_FIELDS = (
     'integrated_solar_energy_mwh', 'integrated_total_energy_mwh',
     'daily_total_energy_difference_mwh', 'daily_solar_energy_difference_mwh',
     'sheet_internal_date_stamp', 'date_stamp_mismatch_accepted',
+    'accepted_time_header_cells',
 )
 
 
@@ -234,6 +236,8 @@ def parse_day(
     filename: str, balance_tolerance_mw: float = 5.1,
     sheet_date_order: str = 'dd.mm',
     accepted_stamp_mismatch_dates: frozenset[date] = frozenset(),
+    accepted_time_header_cells: frozenset[tuple[date, str]] = frozenset(),
+    quarantine_balance_exceptions: bool = False,
 ) -> tuple[list[dict], dict]:
     operating_date = sheet_operating_date(sheet_name, year, month, sheet_date_order)
     day = operating_date.day
@@ -278,15 +282,26 @@ def parse_day(
                        if re.fullmatch(r'A\d+', a) and _normalized(v) == 'time' and int(a[1:]) != 2]
     first = datetime(year, month, day, tzinfo=LOCAL_TZ)
     records: list[dict] = []
+    accepted_time_cells: set[str] = set()
     for i in range(INTERVALS_PER_DAY):
         column = excel_col(i + 2)  # B ... CS
         expected_minute = ((i + 1) * 15) % 1440
         seen = [cells.get(f'{column}{r}') for r in time_rows if cells.get(f'{column}{r}') is not None]
         if not seen:
             raise ValueError(f'Missing time header {column} in {sheet_name}')
-        for v in seen:
-            if _time_minute(v) != expected_minute:
-                raise ValueError(f'Incorrect time header {column}: {v!r} in {sheet_name}')
+        interval_header_exceptions = []
+        for header_row in time_rows:
+            address = f'{column}{header_row}'
+            v = cells.get(address)
+            if v is not None and _time_minute(v) != expected_minute:
+                if ((operating_date, address) not in accepted_time_header_cells
+                        and (operating_date, f"ROW{header_row}") not in accepted_time_header_cells):
+                    raise ValueError(f'Incorrect time header {address}: {v!r} in {sheet_name}')
+                # Never allow all available time headers to be incorrect.
+                if not any(_time_minute(other) == expected_minute for other in seen):
+                    raise ValueError(f'No valid alternate time header in {sheet_name} {address}')
+                interval_header_exceptions.append(address)
+                accepted_time_cells.add(address)
 
         source_values = {
             output: _numeric(cells.get(f'{column}{labels[_normalized(source)]}'),
@@ -296,9 +311,19 @@ def parse_day(
         total = _numeric(cells.get(f'{column}{total_row}'), f'{sheet_name}!{column}{total_row}')
         summed = sum(source_values.values())
         difference = total - summed
-        if abs(difference) > balance_tolerance_mw:
+        is_balance_exception = abs(difference) > 5.1
+        if abs(difference) > balance_tolerance_mw and not quarantine_balance_exceptions:
             raise ValueError(f'{sheet_name} interval {i+1}: total-source gap {difference:.2f} MW '
                              f'(allowed {balance_tolerance_mw:.2f} MW)')
+        quality_flags = []
+        if is_balance_exception:
+            quality_flags.append('source_balance_exception')
+        if any(value < 0 for value in source_values.values()):
+            quality_flags.append('negative_source_observation')
+        if accepted_stamp_discrepancy:
+            quality_flags.append('accepted_date_stamp_mismatch')
+        if interval_header_exceptions:
+            quality_flags.append('accepted_time_header_mismatch')
         start = first + timedelta(minutes=i * 15)
         end = start + timedelta(minutes=15)
         records.append({
@@ -309,6 +334,8 @@ def parse_day(
             **source_values, 'total_dispatch_reported_mw': total,
             'sum_generation_by_source_mw': round(summed, 9),
             'dispatch_balance_difference_mw': round(difference, 9),
+            'interval_quality_status': 'review_required' if quality_flags else 'no_interval_flags',
+            'interval_quality_flags': ';'.join(quality_flags),
         })
 
     # Negative category values (e.g. Oil-IPP / Oil-CEB in the real January file)
@@ -338,6 +365,7 @@ def parse_day(
         'daily_solar_energy_difference_mwh': round(reported_solar - integrated['solar_integrated_mwh'], 6),
         'sheet_internal_date_stamp': stamped_date.isoformat() if stamped_date else '',
         'date_stamp_mismatch_accepted': accepted_stamp_discrepancy,
+        'accepted_time_header_cells': ';'.join(sorted(accepted_time_cells)),
     }
     return records, reconciliation
 
@@ -355,6 +383,8 @@ def process_workbook(input_path: Path, year: int, month: int,
                      sheet_date_order: str = 'auto',
                      allow_partial_month: bool = False,
                      accepted_stamp_mismatch_dates: frozenset[date] = frozenset(),
+                     accepted_time_header_cells: frozenset[tuple[date, str]] = frozenset(),
+                     quarantine_balance_exceptions: bool = False,
                      ) -> tuple[list[dict], list[dict]]:
     if not input_path.is_file():
         raise FileNotFoundError(input_path)
@@ -392,7 +422,9 @@ def process_workbook(input_path: Path, year: int, month: int,
             rows, recon = parse_day(_read_cells(z, sheet_path, shared), sheet_name, year, month,
                                    input_path.name, balance_tolerance_mw,
                                    sheet_date_order=order,
-                                   accepted_stamp_mismatch_dates=accepted_stamp_mismatch_dates)
+                                   accepted_stamp_mismatch_dates=accepted_stamp_mismatch_dates,
+                                   accepted_time_header_cells=accepted_time_header_cells,
+                                   quarantine_balance_exceptions=quarantine_balance_exceptions)
             all_rows.extend(rows)
             daily_reports.append(recon)
             processed_days.add(day)
@@ -407,6 +439,20 @@ def process_workbook(input_path: Path, year: int, month: int,
     daily_reports.sort(key=lambda r: r['operating_date'])
     if len(all_rows) != len(processed_days) * INTERVALS_PER_DAY:
         raise ValueError('Incorrect total number of intervals')
+    actually_accepted = {
+        (date.fromisoformat(r['operating_date']), cell)
+        for r in daily_reports for cell in r['accepted_time_header_cells'].split(';') if cell
+    }
+    unused = {
+        (d, approval) for (d, approval) in accepted_time_header_cells
+        if (d, approval) not in actually_accepted and not (
+            approval.startswith("ROW") and approval[3:].isdigit() and
+            any(recorded_date == d and re.fullmatch(r"[A-Z]+" + approval[3:], address)
+                for recorded_date, address in actually_accepted)
+        )
+    }
+    if unused:
+        raise ValueError(f'Unused time-header exception approvals: {sorted(unused)}')
     return all_rows, daily_reports
 
 
@@ -422,6 +468,11 @@ def main() -> None:
                         help='Worksheet date naming convention (auto checks all dates)')
     parser.add_argument('--allow-partial-month', action='store_true',
                         help='Export with missing dates explicitly flagged; do NOT treat as full month')
+    parser.add_argument('--quarantine-balance-exceptions', action='store_true',
+                        help='Explicitly retain but flag source-total mismatched intervals; not validated for modeling')
+    parser.add_argument('--accept-time-header-mismatch', action='append', default=[],
+                        metavar='YYYY-MM-DD:CH40|YYYY-MM-DD:ROW40',
+                        help='Approve one audited erroneous secondary time-label cell, with a valid matching header')
     parser.add_argument('--accept-date-stamp-mismatch', action='append', default=[],
                         metavar='YYYY-MM-DD',
                         help='Allow and document only a specifically reviewed sheet I1 date discrepancy. '
@@ -435,11 +486,22 @@ def main() -> None:
         parser.error(f'Invalid --accept-date-stamp-mismatch: {exc}')
     if any(d.year != args.year or d.month != args.month for d in accepted_dates):
         parser.error('Accepted date-stamp mismatches must be in the requested month')
+    accepted_headers = set()
+    for item in args.accept_time_header_mismatch:
+        match = re.fullmatch(r'(\d{4}-\d{2}-\d{2}):([A-Z]+\d+)', item)
+        if not match:
+            parser.error(f'Invalid --accept-time-header-mismatch: {item!r}')
+        d = date.fromisoformat(match.group(1))
+        if d.year != args.year or d.month != args.month:
+            parser.error('Accepted time-header mismatches must be in the requested month')
+        accepted_headers.add((d, match.group(2)))
     rows, recon = process_workbook(args.input, args.year, args.month,
                                    args.balance_tolerance_mw,
                                    sheet_date_order=args.sheet_date_order,
                                    allow_partial_month=args.allow_partial_month,
-                                   accepted_stamp_mismatch_dates=accepted_dates)
+                                   accepted_stamp_mismatch_dates=accepted_dates,
+                                   accepted_time_header_cells=frozenset(accepted_headers),
+                                   quarantine_balance_exceptions=args.quarantine_balance_exceptions)
     tag = f'{args.year}_{args.month:02d}'
     available_days = {int(r['operating_date'][-2:]) for r in recon}
     expected_days = set(range(1, calendar.monthrange(args.year, args.month)[1] + 1))
@@ -475,6 +537,11 @@ def main() -> None:
          'sheet_internal_date_stamp': r['sheet_internal_date_stamp']}
         for r in recon if r['date_stamp_mismatch_accepted']
     ]
+    accepted_time_header_exceptions = [
+        {'operating_date': r['operating_date'], 'cell': cell}
+        for r in recon for cell in r['accepted_time_header_cells'].split(';') if cell
+    ]
+    review_required = sum(r['interval_quality_status'] == 'review_required' for r in rows)
     coverage = {
         'source_file': args.input.name, 'year': args.year, 'month': args.month,
         'status': 'incomplete' if missing else 'complete',
@@ -486,6 +553,10 @@ def main() -> None:
         'date_stamp_exceptions_accepted': date_stamp_exceptions,
         'balance_threshold_mw_used': args.balance_tolerance_mw,
         'balance_exceptions_over_5_1_mw': len(balance_flags),
+        'balance_exceptions_quarantined': args.quarantine_balance_exceptions,
+        'time_header_exceptions_accepted': accepted_time_header_exceptions,
+        'intervals_requiring_quality_review': review_required,
+        'interval_quality_warning': 'No interval flags does not establish national-demand, energy or physical validity',
         'limitations': [
             'Reported daily energy differs from quarter-hour integrated power',
             'Reported dispatch is not independently verified national demand',
@@ -497,6 +568,9 @@ def main() -> None:
     print(f'Coverage report: {coverage_path} ({coverage["status"]})')
     print(f'Negative-observation flags: {anomaly_path} ({len(anomalies)} rows)')
     print(f'Balance exceptions exceeding 5.1 MW: {balance_flags_path} ({len(balance_flags)} rows)')
+    print(f'Intervals flagged for quality review: {review_required}')
+    for issue in accepted_time_header_exceptions:
+        print('WARNING: ACCEPTED TIME HEADER MISMATCH:', issue)
     for issue in date_stamp_exceptions:
         print('WARNING: ACCEPTED SOURCE DATE STAMP MISMATCH:', issue)
     print(f'Dispatch CSV: {dispatch_path}')
@@ -510,7 +584,7 @@ def main() -> None:
         print(f'WARNING: EXCLUDE incomplete {args.year}-{args.month:02d} from full-month analysis; '
               f'missing dates: {coverage["missing_dates"]}')
     if balance_flags:
-        print('WARNING: Elevated source-total residual accepted by explicit tolerance; investigate flags.')
+        print('WARNING: Source-total residual exceptions present; quarantined or admitted by explicit settings. Investigate flags.')
     print('WARNING: Daily MWh discrepancy remains unresolved and is recorded, not corrected.')
     print('WARNING: Reported dispatch has not been established as total national demand.')
 

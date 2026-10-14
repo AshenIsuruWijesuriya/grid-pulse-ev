@@ -88,6 +88,8 @@ def _validate_intervals(rows: list[dict[str, str]], info: dict, available: list[
     max_difference = 0.0
     seen = set()
     for row in rows:
+        if "interval_quality_status" in row and row["interval_quality_status"] not in ("no_interval_flags", "review_required"):
+            raise ValueError("Invalid interval_quality_status")
         day = row["operating_date"]
         if day not in available:
             raise ValueError(f"Dispatch row date not in coverage report: {day}")
@@ -183,6 +185,12 @@ def consolidate(root: Path, year: int, months: list[int], include_partial: bool)
             "observed_intervals": len(rows),
             "missing_dates": missing,
             "negative_generation_observations": negatives,
+            "interval_quality_annotation_available": all(
+                "interval_quality_status" in r for r in rows),
+            "intervals_requiring_quality_review": (
+                sum(r.get("interval_quality_status") == "review_required" for r in rows)
+                if all("interval_quality_status" in r for r in rows) else None
+            ),
             "max_source_balance_difference_mw": round(max_difference, 3),
             "mean_reported_minus_integrated_mwh_per_observed_day": round(
                 sum(float(r["daily_total_energy_difference_mwh"]) for r in recon) / len(recon), 2),
@@ -237,6 +245,7 @@ def consolidate(root: Path, year: int, months: list[int], include_partial: bool)
             "Reported daily MWh and quarter-hour integrated MW disagree; values are not corrected",
             "Some renewable sources, notably solar PV, may be underrepresented in quarter-hour dispatch",
             "Negative generation values are preserved and flagged",
+            "Interval quality flags indicate records requiring investigation; unflagged records are not automatically validated",
             "Partial-month data are observational only, never full-month statistics",
             "Missing dates are not fabricated, filled with zero, or interpolated",
         ],
@@ -288,7 +297,15 @@ def main() -> None:
     daily_path = args.output_dir / f"{stem}_observed_daily_summary.csv"
     report_path = args.output_dir / f"{stem}_coverage_quality.json"
     if intervals:
-        write_csv(dispatch_path, intervals, [*REQUIRED_COLS, "month_coverage_status", "eligible_for_full_month_statistics"])
+        extra_fields = ["interval_quality_status", "interval_quality_flags"]
+        if any(any(field in r for field in extra_fields) for r in intervals):
+            for row in intervals:
+                row.setdefault("interval_quality_status", "legacy_unannotated")
+                row.setdefault("interval_quality_flags", "")
+            fields = [*REQUIRED_COLS, *extra_fields, "month_coverage_status", "eligible_for_full_month_statistics"]
+        else:
+            fields = [*REQUIRED_COLS, "month_coverage_status", "eligible_for_full_month_statistics"]
+        write_csv(dispatch_path, intervals, fields)
     else:
         raise ValueError("No eligible observations available for export")
     write_csv(daily_path, days, list(days[0].keys()))
