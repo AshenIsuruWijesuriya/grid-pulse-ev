@@ -16,12 +16,17 @@ IMPORTANT:
   integration. These differences are preserved, never silently 'fixed'.
 * Total reported dispatch is NOT independently verified national demand.
 * The 'Solar' row should not be assumed to cover all Sri Lankan PV generation.
+* Worksheet dates may use DD.MM, MM.DD, or DD-MM-YYYY. Infer the naming
+  convention across the entire workbook and reject unrecognized populated tabs.
+* Incomplete months fail by default. --allow-partial-month permits a clearly
+  flagged, partial export with a separate coverage report.
 """
 from __future__ import annotations
 
 import argparse
 import calendar
 import csv
+import json
 from datetime import date, datetime, time, timedelta, timezone
 from math import isfinite
 from pathlib import Path
@@ -158,17 +163,78 @@ def _time_minute(value: object) -> int:
     raise ValueError(f'Unrecognized time value: {value!r}')
 
 
+def sheet_operating_date(sheet_name: str, year: int, month: int,
+                         sheet_date_order: str) -> date:
+    """Parse a date using an explicit workbook-wide naming convention."""
+    sheet_name = sheet_name.strip()
+    if sheet_date_order == 'dd-mm-yyyy':
+        match = re.fullmatch(r'(\d{1,2})-(\d{1,2})-(\d{4})', sheet_name)
+        if not match:
+            raise ValueError(f'Unrecognized day worksheet name {sheet_name!r}')
+        day, stated_month, stated_year = map(int, match.groups())
+        if stated_year != year:
+            raise ValueError(f'Worksheet {sheet_name!r} not in requested year {year}')
+    else:
+        match = re.fullmatch(r'(\d{1,2})\.(\d{1,2})', sheet_name)
+        if not match:
+            raise ValueError(f'Unrecognized day worksheet name {sheet_name!r}')
+        first, second = map(int, match.groups())
+        if sheet_date_order == 'dd.mm':
+            day, stated_month = first, second
+        elif sheet_date_order == 'mm.dd':
+            stated_month, day = first, second
+        else:
+            raise ValueError(f'Unsupported sheet date order: {sheet_date_order!r}')
+
+    if stated_month != month:
+        raise ValueError(f'Worksheet {sheet_name!r} not in requested month {month} '
+                         f'(interpreted as {sheet_date_order})')
+    try:
+        return date(year, month, day)
+    except ValueError as exc:
+        raise ValueError(f'Invalid worksheet date: {sheet_name!r} '
+                         f'(interpreted as {sheet_date_order})') from exc
+
+
+def detect_sheet_date_order(sheet_names: list[str], year: int, month: int,
+                            *, allow_partial: bool = False) -> str:
+    """Infer workbook date order only when exactly one format matches all sheets."""
+    expected_days = set(range(1, calendar.monthrange(year, month)[1] + 1))
+    candidates = []
+    for order in ('dd.mm', 'mm.dd', 'dd-mm-yyyy'):
+        try:
+            days = [sheet_operating_date(name, year, month, order).day
+                    for name in sheet_names]
+        except ValueError:
+            continue
+        no_repeats = len(set(days)) == len(days)
+        if (no_repeats and days and set(days) <= expected_days
+                and (allow_partial or set(days) == expected_days)):
+            candidates.append(order)
+    if len(candidates) != 1:
+        raise ValueError(
+            'Cannot uniquely determine worksheet date convention for '
+            f'{year}-{month:02d}. Candidates: {candidates}; '
+            f'example worksheet names: {sheet_names[:6]}. '
+            'Inspect the original workbook; if needed specify '
+            '--sheet-date-order dd.mm, mm.dd or dd-mm-yyyy.'
+        )
+    return candidates[0]
+
+
+def _is_date_sheet(name: str) -> bool:
+    """Only dates shaped like one of the documented formats qualify as data tabs."""
+    return bool(re.fullmatch(r'\s*(?:\d{1,2}\.\d{1,2}|'
+                             r'\d{1,2}-\d{1,2}-\d{4})\s*', name))
+
+
 def parse_day(
     cells: dict[str, str | float], sheet_name: str, year: int, month: int,
     filename: str, balance_tolerance_mw: float = 5.1,
+    sheet_date_order: str = 'dd.mm',
 ) -> tuple[list[dict], dict]:
-    m = re.fullmatch(r'\s*(\d{1,2})\.(\d{1,2})\s*', sheet_name)
-    if not m:
-        raise ValueError(f'Unrecognized day worksheet name {sheet_name!r}')
-    day, observed_month = map(int, m.groups())
-    if observed_month != month:
-        raise ValueError(f'Worksheet {sheet_name!r} not in requested month {month}')
-    operating_date = date(year, month, day)
+    operating_date = sheet_operating_date(sheet_name, year, month, sheet_date_order)
+    day = operating_date.day
 
     # Optional workbook date stamp near I1 is an Excel serial date.
     numeric_stamp = cells.get('I1')
@@ -277,7 +343,9 @@ def _write_csv(path: Path, headings: tuple[str, ...], rows: list[dict]) -> None:
 
 
 def process_workbook(input_path: Path, year: int, month: int,
-                     balance_tolerance_mw: float = 5.1) -> tuple[list[dict], list[dict]]:
+                     balance_tolerance_mw: float = 5.1,
+                     sheet_date_order: str = 'auto',
+                     allow_partial_month: bool = False) -> tuple[list[dict], list[dict]]:
     if not input_path.is_file():
         raise FileNotFoundError(input_path)
     expected_days = set(range(1, calendar.monthrange(year, month)[1] + 1))
@@ -287,23 +355,46 @@ def process_workbook(input_path: Path, year: int, month: int,
     with ZipFile(input_path) as z:
         shared = _read_shared_strings(z)
         sheets = _sheet_refs(z)
+        data_sheets = []
         for sheet_name, sheet_path in sheets:
-            match = re.fullmatch(r'\s*(\d{1,2})\.(\d{1,2})\s*', sheet_name)
-            if not match:
-                raise ValueError(f'Unexpected worksheet {sheet_name!r}; no data silently skipped')
-            day, sheet_month = int(match.group(1)), int(match.group(2))
-            if sheet_month != month or day not in expected_days or day in processed_days:
+            if _is_date_sheet(sheet_name):
+                data_sheets.append((sheet_name, sheet_path))
+            else:
+                # Ignore *only* genuinely empty non-date worksheets (March's Sheet2).
+                if _read_cells(z, sheet_path, shared):
+                    raise ValueError(f'Unrecognized non-empty worksheet: {sheet_name!r}')
+                print(f'Ignoring empty non-date worksheet: {sheet_name!r}')
+        if not data_sheets:
+            raise ValueError('No recognizable day worksheets found')
+        if sheet_date_order == 'auto':
+            order = detect_sheet_date_order([name for name, _ in data_sheets],
+                                            year, month, allow_partial=True)
+        elif sheet_date_order in ('dd.mm', 'mm.dd', 'dd-mm-yyyy'):
+            order = sheet_date_order
+        else:
+            raise ValueError(f'Unsupported sheet date order: {sheet_date_order!r}')
+        print(f'Worksheet date convention: {order}')
+        for sheet_name, sheet_path in data_sheets:
+            operating_date = sheet_operating_date(sheet_name, year, month, order)
+            day = operating_date.day
+            if day not in expected_days or day in processed_days:
                 raise ValueError(f'Unexpected or repeated worksheet date: {sheet_name!r}')
             rows, recon = parse_day(_read_cells(z, sheet_path, shared), sheet_name, year, month,
-                                   input_path.name, balance_tolerance_mw)
+                                   input_path.name, balance_tolerance_mw,
+                                   sheet_date_order=order)
             all_rows.extend(rows)
             daily_reports.append(recon)
             processed_days.add(day)
-    if processed_days != expected_days:
-        raise ValueError(f'Missing day worksheets: {sorted(expected_days - processed_days)}')
+    missing = sorted(expected_days - processed_days)
+    if missing and not allow_partial_month:
+        raise ValueError(f'Missing day worksheets for {year}-{month:02d}: {missing}. '
+                         'Refusing to export incomplete month; use --allow-partial-month '
+                         'only when deliberately producing a labeled partial dataset.')
+    if missing:
+        print(f'WARNING: INCOMPLETE MONTH: missing days {missing}')
     all_rows.sort(key=lambda r: r['interval_start_local'])
     daily_reports.sort(key=lambda r: r['operating_date'])
-    if len(all_rows) != len(expected_days) * INTERVALS_PER_DAY:
+    if len(all_rows) != len(processed_days) * INTERVALS_PER_DAY:
         raise ValueError('Incorrect total number of intervals')
     return all_rows, daily_reports
 
@@ -315,14 +406,25 @@ def main() -> None:
     parser.add_argument('--month', type=int, choices=range(1, 13), required=True)
     parser.add_argument('--output-dir', type=Path, default=Path('data/processed/grid'))
     parser.add_argument('--balance-tolerance-mw', type=float, default=5.1)
+    parser.add_argument('--sheet-date-order', choices=('auto', 'dd.mm', 'mm.dd', 'dd-mm-yyyy'),
+                        default='auto',
+                        help='Worksheet date naming convention (auto checks all dates)')
+    parser.add_argument('--allow-partial-month', action='store_true',
+                        help='Export with missing dates explicitly flagged; do NOT treat as full month')
     args = parser.parse_args()
     if args.balance_tolerance_mw < 0:
         parser.error('balance tolerance must be nonnegative')
     rows, recon = process_workbook(args.input, args.year, args.month,
-                                   args.balance_tolerance_mw)
+                                   args.balance_tolerance_mw,
+                                   sheet_date_order=args.sheet_date_order,
+                                   allow_partial_month=args.allow_partial_month)
     tag = f'{args.year}_{args.month:02d}'
-    dispatch_path = args.output_dir / f'pucsl_{tag}_dispatch_15min.csv'
-    recon_path = args.output_dir / f'pucsl_{tag}_reconciliation.csv'
+    available_days = {int(r['operating_date'][-2:]) for r in recon}
+    expected_days = set(range(1, calendar.monthrange(args.year, args.month)[1] + 1))
+    missing = sorted(expected_days - available_days)
+    suffix = '_partial' if missing else ''
+    dispatch_path = args.output_dir / f'pucsl_{tag}{suffix}_dispatch_15min.csv'
+    recon_path = args.output_dir / f'pucsl_{tag}{suffix}_reconciliation.csv'
     _write_csv(dispatch_path, FIELDNAMES, rows)
     _write_csv(recon_path, RECON_FIELDS, recon)
     anomalies = [
@@ -330,9 +432,26 @@ def main() -> None:
          'source': source, 'value_mw': r[source], 'issue': 'negative generation observation'}
         for r in rows for source in SOURCES if r[source] < 0
     ]
-    anomaly_path = args.output_dir / f'pucsl_{tag}_negative_generation_flags.csv'
+    anomaly_path = args.output_dir / f'pucsl_{tag}{suffix}_negative_generation_flags.csv'
     _write_csv(anomaly_path, ('operating_date', 'interval_end_local',
                               'source', 'value_mw', 'issue'), anomalies)
+    coverage = {
+        'source_file': args.input.name, 'year': args.year, 'month': args.month,
+        'status': 'incomplete' if missing else 'complete',
+        'available_dates': [r['operating_date'] for r in recon],
+        'missing_dates': [date(args.year, args.month, d).isoformat() for d in missing],
+        'expected_days': len(expected_days), 'available_days': len(available_days),
+        'intervals': len(rows), 'resolution_minutes': 15,
+        'timestamp_convention': 'provisional interval-end source labels',
+        'limitations': [
+            'Reported daily energy differs from quarter-hour integrated power',
+            'Reported dispatch is not independently verified national demand',
+            'PV may be underrepresented in reported quarter-hour dispatch',
+        ],
+    }
+    coverage_path = args.output_dir / f'pucsl_{tag}_coverage.json'
+    coverage_path.write_text(json.dumps(coverage, indent=2) + '\n', encoding='utf-8')
+    print(f'Coverage report: {coverage_path} ({coverage["status"]})')
     print(f'Negative-observation flags: {anomaly_path} ({len(anomalies)} rows)')
     print(f'Dispatch CSV: {dispatch_path}')
     print(f'Reconciliation CSV: {recon_path}')
@@ -341,6 +460,9 @@ def main() -> None:
     avg_energy_gap = sum(r['daily_total_energy_difference_mwh'] for r in recon) / len(recon)
     print(f'Max |reported MW - source sum MW|: {largest_gap:.3f} MW')
     print(f'Mean (reported daily MWh - integrated 15-min MWh): {avg_energy_gap:.2f} MWh/day')
+    if missing:
+        print(f'WARNING: EXCLUDE incomplete {args.year}-{args.month:02d} from full-month analysis; '
+              f'missing dates: {coverage["missing_dates"]}')
     print('WARNING: Daily MWh discrepancy remains unresolved and is recorded, not corrected.')
     print('WARNING: Reported dispatch has not been established as total national demand.')
 
