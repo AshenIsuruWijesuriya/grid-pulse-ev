@@ -70,6 +70,7 @@ RECON_FIELDS = (
     'reported_daily_solar_energy_mwh', 'reported_daily_wind_energy_mwh',
     'integrated_solar_energy_mwh', 'integrated_total_energy_mwh',
     'daily_total_energy_difference_mwh', 'daily_solar_energy_difference_mwh',
+    'sheet_internal_date_stamp', 'date_stamp_mismatch_accepted',
 )
 
 
@@ -232,16 +233,21 @@ def parse_day(
     cells: dict[str, str | float], sheet_name: str, year: int, month: int,
     filename: str, balance_tolerance_mw: float = 5.1,
     sheet_date_order: str = 'dd.mm',
+    accepted_stamp_mismatch_dates: frozenset[date] = frozenset(),
 ) -> tuple[list[dict], dict]:
     operating_date = sheet_operating_date(sheet_name, year, month, sheet_date_order)
     day = operating_date.day
 
     # Optional workbook date stamp near I1 is an Excel serial date.
     numeric_stamp = cells.get('I1')
+    stamped_date = None
+    accepted_stamp_discrepancy = False
     if isinstance(numeric_stamp, (int, float)) and 30000 <= numeric_stamp <= 100000:
         stamped_date = date(1899, 12, 30) + timedelta(days=int(numeric_stamp))
         if stamped_date != operating_date:
-            raise ValueError(f'Worksheet date mismatch {sheet_name}: I1={stamped_date}')
+            if operating_date not in accepted_stamp_mismatch_dates:
+                raise ValueError(f'Worksheet date mismatch {sheet_name}: I1={stamped_date}')
+            accepted_stamp_discrepancy = True
 
     labels: dict[str, int] = {}
     for address, value in cells.items():
@@ -330,6 +336,8 @@ def parse_day(
         'integrated_total_energy_mwh': total_integrated,
         'daily_total_energy_difference_mwh': round(reported_total - total_integrated, 6),
         'daily_solar_energy_difference_mwh': round(reported_solar - integrated['solar_integrated_mwh'], 6),
+        'sheet_internal_date_stamp': stamped_date.isoformat() if stamped_date else '',
+        'date_stamp_mismatch_accepted': accepted_stamp_discrepancy,
     }
     return records, reconciliation
 
@@ -345,7 +353,9 @@ def _write_csv(path: Path, headings: tuple[str, ...], rows: list[dict]) -> None:
 def process_workbook(input_path: Path, year: int, month: int,
                      balance_tolerance_mw: float = 5.1,
                      sheet_date_order: str = 'auto',
-                     allow_partial_month: bool = False) -> tuple[list[dict], list[dict]]:
+                     allow_partial_month: bool = False,
+                     accepted_stamp_mismatch_dates: frozenset[date] = frozenset(),
+                     ) -> tuple[list[dict], list[dict]]:
     if not input_path.is_file():
         raise FileNotFoundError(input_path)
     expected_days = set(range(1, calendar.monthrange(year, month)[1] + 1))
@@ -381,7 +391,8 @@ def process_workbook(input_path: Path, year: int, month: int,
                 raise ValueError(f'Unexpected or repeated worksheet date: {sheet_name!r}')
             rows, recon = parse_day(_read_cells(z, sheet_path, shared), sheet_name, year, month,
                                    input_path.name, balance_tolerance_mw,
-                                   sheet_date_order=order)
+                                   sheet_date_order=order,
+                                   accepted_stamp_mismatch_dates=accepted_stamp_mismatch_dates)
             all_rows.extend(rows)
             daily_reports.append(recon)
             processed_days.add(day)
@@ -411,13 +422,24 @@ def main() -> None:
                         help='Worksheet date naming convention (auto checks all dates)')
     parser.add_argument('--allow-partial-month', action='store_true',
                         help='Export with missing dates explicitly flagged; do NOT treat as full month')
+    parser.add_argument('--accept-date-stamp-mismatch', action='append', default=[],
+                        metavar='YYYY-MM-DD',
+                        help='Allow and document only a specifically reviewed sheet I1 date discrepancy. '
+                             'Never use this for unreviewed sheets.')
     args = parser.parse_args()
     if args.balance_tolerance_mw < 0:
         parser.error('balance tolerance must be nonnegative')
+    try:
+        accepted_dates = frozenset(date.fromisoformat(x) for x in args.accept_date_stamp_mismatch)
+    except ValueError as exc:
+        parser.error(f'Invalid --accept-date-stamp-mismatch: {exc}')
+    if any(d.year != args.year or d.month != args.month for d in accepted_dates):
+        parser.error('Accepted date-stamp mismatches must be in the requested month')
     rows, recon = process_workbook(args.input, args.year, args.month,
                                    args.balance_tolerance_mw,
                                    sheet_date_order=args.sheet_date_order,
-                                   allow_partial_month=args.allow_partial_month)
+                                   allow_partial_month=args.allow_partial_month,
+                                   accepted_stamp_mismatch_dates=accepted_dates)
     tag = f'{args.year}_{args.month:02d}'
     available_days = {int(r['operating_date'][-2:]) for r in recon}
     expected_days = set(range(1, calendar.monthrange(args.year, args.month)[1] + 1))
@@ -435,6 +457,24 @@ def main() -> None:
     anomaly_path = args.output_dir / f'pucsl_{tag}{suffix}_negative_generation_flags.csv'
     _write_csv(anomaly_path, ('operating_date', 'interval_end_local',
                               'source', 'value_mw', 'issue'), anomalies)
+    # Even when the operator explicitly accepts a slightly higher tolerance,
+    # preserve every observation exceeding the original strict 5.1 MW check.
+    balance_flags = [
+        {'operating_date': r['operating_date'],
+         'interval_end_local': r['interval_end_local'],
+         'difference_mw': r['dispatch_balance_difference_mw'],
+         'issue': 'Source-total residual exceeds 5.1 MW baseline audit limit'}
+        for r in rows if abs(r['dispatch_balance_difference_mw']) > 5.1
+    ]
+    balance_flags_path = args.output_dir / f'pucsl_{tag}{suffix}_balance_flags.csv'
+    _write_csv(balance_flags_path,
+               ('operating_date', 'interval_end_local', 'difference_mw', 'issue'),
+               balance_flags)
+    date_stamp_exceptions = [
+        {'operating_date': r['operating_date'], 'source_sheet': r['source_sheet'],
+         'sheet_internal_date_stamp': r['sheet_internal_date_stamp']}
+        for r in recon if r['date_stamp_mismatch_accepted']
+    ]
     coverage = {
         'source_file': args.input.name, 'year': args.year, 'month': args.month,
         'status': 'incomplete' if missing else 'complete',
@@ -443,6 +483,9 @@ def main() -> None:
         'expected_days': len(expected_days), 'available_days': len(available_days),
         'intervals': len(rows), 'resolution_minutes': 15,
         'timestamp_convention': 'provisional interval-end source labels',
+        'date_stamp_exceptions_accepted': date_stamp_exceptions,
+        'balance_threshold_mw_used': args.balance_tolerance_mw,
+        'balance_exceptions_over_5_1_mw': len(balance_flags),
         'limitations': [
             'Reported daily energy differs from quarter-hour integrated power',
             'Reported dispatch is not independently verified national demand',
@@ -453,6 +496,9 @@ def main() -> None:
     coverage_path.write_text(json.dumps(coverage, indent=2) + '\n', encoding='utf-8')
     print(f'Coverage report: {coverage_path} ({coverage["status"]})')
     print(f'Negative-observation flags: {anomaly_path} ({len(anomalies)} rows)')
+    print(f'Balance exceptions exceeding 5.1 MW: {balance_flags_path} ({len(balance_flags)} rows)')
+    for issue in date_stamp_exceptions:
+        print('WARNING: ACCEPTED SOURCE DATE STAMP MISMATCH:', issue)
     print(f'Dispatch CSV: {dispatch_path}')
     print(f'Reconciliation CSV: {recon_path}')
     print(f'Days: {len(recon)} | 15-minute intervals: {len(rows)}')
@@ -463,6 +509,8 @@ def main() -> None:
     if missing:
         print(f'WARNING: EXCLUDE incomplete {args.year}-{args.month:02d} from full-month analysis; '
               f'missing dates: {coverage["missing_dates"]}')
+    if balance_flags:
+        print('WARNING: Elevated source-total residual accepted by explicit tolerance; investigate flags.')
     print('WARNING: Daily MWh discrepancy remains unresolved and is recorded, not corrected.')
     print('WARNING: Reported dispatch has not been established as total national demand.')
 
