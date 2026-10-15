@@ -225,6 +225,37 @@ def detect_sheet_date_order(sheet_names: list[str], year: int, month: int,
     return candidates[0]
 
 
+
+def audited_july_2024_date_orders(sheet_names: list[str], year: int, month: int) -> dict[str, str]:
+    """Approve only the observed mixed-name pattern in the official July 2024 workbook.
+
+    Days 1-7 have DD.MM worksheet names, while days 8-31 have MM.DD.
+    Require EXACTLY the audited 31-sheet pattern, without duplicates or extras.
+    """
+    if (year, month) != (2024, 7):
+        raise ValueError('Audited July 2024 mixed naming is valid only for 2024-07')
+    expected = {f'{d:02d}.07': 'dd.mm' for d in range(1, 8)}
+    expected.update({f'07.{d:02d}': 'mm.dd' for d in range(8, 32)})
+    trimmed = [name.strip() for name in sheet_names]
+    if len(trimmed) != len(set(trimmed)) or set(trimmed) != set(expected):
+        raise ValueError('July 2024 mixed worksheet names differ from audited pattern; '
+                         f'missing={sorted(set(expected)-set(trimmed))}; '
+                         f'unexpected={sorted(set(trimmed)-set(expected))}')
+    return expected
+
+
+def audited_june_2024_time_cells(year: int, month: int) -> frozenset[tuple[date, str]]:
+    """Approve only 17 incorrect secondary time cells on each June 14-29 sheet.
+
+    The authoritative row-2 time labels MUST still match, verified by parse_day.
+    Every approval MUST be used, verified by process_workbook.
+    """
+    if (year, month) != (2024, 6):
+        raise ValueError('Audited June 2024 time approvals valid only for 2024-06')
+    return frozenset((date(2024, 6, d), f'{excel_col(col)}41')
+                     for d in range(14, 30) for col in range(51, 68))
+
+
 def _is_date_sheet(name: str) -> bool:
     """Only dates shaped like one of the documented formats qualify as data tabs."""
     return bool(re.fullmatch(r'\s*(?:\d{1,2}\.\d{1,2}|'
@@ -385,6 +416,7 @@ def process_workbook(input_path: Path, year: int, month: int,
                      accepted_stamp_mismatch_dates: frozenset[date] = frozenset(),
                      accepted_time_header_cells: frozenset[tuple[date, str]] = frozenset(),
                      quarantine_balance_exceptions: bool = False,
+                     audited_july_2024_mixed_names: bool = False,
                      ) -> tuple[list[dict], list[dict]]:
     if not input_path.is_file():
         raise FileNotFoundError(input_path)
@@ -406,22 +438,31 @@ def process_workbook(input_path: Path, year: int, month: int,
                 print(f'Ignoring empty non-date worksheet: {sheet_name!r}')
         if not data_sheets:
             raise ValueError('No recognizable day worksheets found')
-        if sheet_date_order == 'auto':
-            order = detect_sheet_date_order([name for name, _ in data_sheets],
-                                            year, month, allow_partial=True)
-        elif sheet_date_order in ('dd.mm', 'mm.dd', 'dd-mm-yyyy'):
-            order = sheet_date_order
+        if audited_july_2024_mixed_names:
+            if sheet_date_order != 'auto':
+                raise ValueError('Audited July mixed names cannot be combined with --sheet-date-order')
+            per_sheet_order = audited_july_2024_date_orders(
+                [name for name, _ in data_sheets], year, month)
+            order = 'audited-mixed-2024-07 (days 1-7: dd.mm; days 8-31: mm.dd)'
         else:
-            raise ValueError(f'Unsupported sheet date order: {sheet_date_order!r}')
+            if sheet_date_order == 'auto':
+                order = detect_sheet_date_order([name for name, _ in data_sheets],
+                                                year, month, allow_partial=True)
+            elif sheet_date_order in ('dd.mm', 'mm.dd', 'dd-mm-yyyy'):
+                order = sheet_date_order
+            else:
+                raise ValueError(f'Unsupported sheet date order: {sheet_date_order!r}')
+            per_sheet_order = {name.strip(): order for name, _ in data_sheets}
         print(f'Worksheet date convention: {order}')
         for sheet_name, sheet_path in data_sheets:
-            operating_date = sheet_operating_date(sheet_name, year, month, order)
+            day_order = per_sheet_order[sheet_name.strip()]
+            operating_date = sheet_operating_date(sheet_name, year, month, day_order)
             day = operating_date.day
             if day not in expected_days or day in processed_days:
                 raise ValueError(f'Unexpected or repeated worksheet date: {sheet_name!r}')
             rows, recon = parse_day(_read_cells(z, sheet_path, shared), sheet_name, year, month,
                                    input_path.name, balance_tolerance_mw,
-                                   sheet_date_order=order,
+                                   sheet_date_order=day_order,
                                    accepted_stamp_mismatch_dates=accepted_stamp_mismatch_dates,
                                    accepted_time_header_cells=accepted_time_header_cells,
                                    quarantine_balance_exceptions=quarantine_balance_exceptions)
@@ -470,6 +511,10 @@ def main() -> None:
                         help='Export with missing dates explicitly flagged; do NOT treat as full month')
     parser.add_argument('--quarantine-balance-exceptions', action='store_true',
                         help='Explicitly retain but flag source-total mismatched intervals; not validated for modeling')
+    parser.add_argument('--accept-audited-july-2024-mixed-sheet-names', action='store_true',
+                        help='Explicitly accept ONLY the verified July 2024 sheet naming pattern')
+    parser.add_argument('--accept-audited-june-2024-secondary-time-labels', action='store_true',
+                        help='Explicitly accept ONLY 272 verified secondary time errors, June 14-29')
     parser.add_argument('--accept-time-header-mismatch', action='append', default=[],
                         metavar='YYYY-MM-DD:CH40|YYYY-MM-DD:ROW40',
                         help='Approve one audited erroneous secondary time-label cell, with a valid matching header')
@@ -495,13 +540,20 @@ def main() -> None:
         if d.year != args.year or d.month != args.month:
             parser.error('Accepted time-header mismatches must be in the requested month')
         accepted_headers.add((d, match.group(2)))
+    if args.accept_audited_june_2024_secondary_time_labels:
+        if (args.year, args.month) != (2024, 6):
+            parser.error('Audited June time-header approval only applies to 2024-06')
+        accepted_headers.update(audited_june_2024_time_cells(args.year, args.month))
+    if args.accept_audited_july_2024_mixed_sheet_names and (args.year, args.month) != (2024, 7):
+        parser.error('Audited July naming approval only applies to 2024-07')
     rows, recon = process_workbook(args.input, args.year, args.month,
                                    args.balance_tolerance_mw,
                                    sheet_date_order=args.sheet_date_order,
                                    allow_partial_month=args.allow_partial_month,
                                    accepted_stamp_mismatch_dates=accepted_dates,
                                    accepted_time_header_cells=frozenset(accepted_headers),
-                                   quarantine_balance_exceptions=args.quarantine_balance_exceptions)
+                                   quarantine_balance_exceptions=args.quarantine_balance_exceptions,
+                                   audited_july_2024_mixed_names=args.accept_audited_july_2024_mixed_sheet_names)
     tag = f'{args.year}_{args.month:02d}'
     available_days = {int(r['operating_date'][-2:]) for r in recon}
     expected_days = set(range(1, calendar.monthrange(args.year, args.month)[1] + 1))
@@ -550,6 +602,9 @@ def main() -> None:
         'expected_days': len(expected_days), 'available_days': len(available_days),
         'intervals': len(rows), 'resolution_minutes': 15,
         'timestamp_convention': 'provisional interval-end source labels',
+        'worksheet_date_convention': ('audited-mixed-2024-07' if args.accept_audited_july_2024_mixed_sheet_names
+                                      else args.sheet_date_order),
+        'audited_june_2024_secondary_time_labels_accepted': args.accept_audited_june_2024_secondary_time_labels,
         'date_stamp_exceptions_accepted': date_stamp_exceptions,
         'balance_threshold_mw_used': args.balance_tolerance_mw,
         'balance_exceptions_over_5_1_mw': len(balance_flags),
@@ -569,8 +624,12 @@ def main() -> None:
     print(f'Negative-observation flags: {anomaly_path} ({len(anomalies)} rows)')
     print(f'Balance exceptions exceeding 5.1 MW: {balance_flags_path} ({len(balance_flags)} rows)')
     print(f'Intervals flagged for quality review: {review_required}')
-    for issue in accepted_time_header_exceptions:
-        print('WARNING: ACCEPTED TIME HEADER MISMATCH:', issue)
+    if len(accepted_time_header_exceptions) > 24:
+        print(f'WARNING: {len(accepted_time_header_exceptions)} AUDITED TIME HEADER ERRORS ACCEPTED; '
+              'see coverage JSON for every cell')
+    else:
+        for issue in accepted_time_header_exceptions:
+            print('WARNING: ACCEPTED TIME HEADER MISMATCH:', issue)
     for issue in date_stamp_exceptions:
         print('WARNING: ACCEPTED SOURCE DATE STAMP MISMATCH:', issue)
     print(f'Dispatch CSV: {dispatch_path}')
