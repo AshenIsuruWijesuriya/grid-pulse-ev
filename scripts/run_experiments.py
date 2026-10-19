@@ -192,6 +192,25 @@ def run_case(days: list, sessions: pd.DataFrame, signal: pd.DataFrame, cfg: dict
     return {"metrics": metrics, "loads": loads, "days": kept, "dropped_days": dropped}
 
 
+def leads(rank: dict, strategy: str = "curtailment_aware") -> bool:
+    """True when `strategy` is first or tied first in every ranking (never outranked)."""
+    return all(strategy in groups[0] for groups in rank.values())
+
+
+def absorbed_by_day(result: dict, signal: pd.DataFrame) -> pd.DataFrame:
+    """Risk energy absorbed (MWh) per day and strategy, plus the day's risk energy."""
+    rows = {}
+    for d in result["days"]:
+        hours = pd.date_range(d, periods=24, freq="h")
+        risk = signal["curtailment_risk_mw"].reindex(hours).fillna(0.0)
+        row = {"risk_mwh": round(float(risk.sum()), 2)}
+        for s, load in result["loads"].items():
+            left = sch.curtailment_with_load(signal, load).reindex(hours).fillna(0.0)
+            row[s] = round(float((risk - left).sum()), 2)
+        rows[str(d.date())] = row
+    return pd.DataFrame.from_dict(rows, orient="index").rename_axis("day")
+
+
 def ranking(metrics: dict, tol_mwh: float = 0.5, tol_mw: float = 0.05) -> dict:
     """Strategy order by absorption (high first) and evening peak (low first).
 
@@ -244,7 +263,8 @@ def plot_day_profile(day, signal, loads, path: Path) -> None:
         _style(ax)
         for i in np.flatnonzero(risk):
             ax.axvspan(i - 0.5, i + 0.5, color="#e34948", alpha=0.10, linewidth=0)
-    top.fill_between(x, sig["net_load_mw"], np.maximum(sig["net_load_mw"], sig["nlmin_mw"]),
+    below = (sig["net_load_mw"] < sig["nlmin_mw"]).to_numpy()
+    top.fill_between(x, sig["net_load_mw"], sig["nlmin_mw"], where=below, interpolate=True,
                      color="#e34948", alpha=0.25, linewidth=0,
                      label="Curtailment risk C(t) (gap to NLmin)")
     top.plot(x, sig["nlmin_mw"], color=INK_2, linestyle="--", linewidth=1.2, label="NLmin")
@@ -255,8 +275,9 @@ def plot_day_profile(day, signal, loads, path: Path) -> None:
     top.legend(frameon=False, fontsize=8.5, loc="upper left")
     for s in ("uncontrolled", "solar_following", "curtailment_aware", "curtailment_aware_ml"):
         if s in loads:
+            # The forecast line often coincides with perfect foresight; dash it so both show.
             bot.plot(x, loads[s].reindex(hours, fill_value=0.0), color=COLORS[s], linewidth=2,
-                     label=LABELS[s])
+                     linestyle="--" if s.endswith(FORECAST_SUFFIXES) else "-", label=LABELS[s])
     bot.set_ylabel("EV charging load (MW)", color=INK_2)
     bot.set_title("EV load by strategy (shaded: hours with curtailment risk)", loc="left",
                   color=INK, fontsize=10)
@@ -271,21 +292,30 @@ def plot_day_profile(day, signal, loads, path: Path) -> None:
 
 def plot_tradeoff(tradeoff: pd.DataFrame, path: Path) -> None:
     import matplotlib.pyplot as plt
+    # Absorption is shown in the subtitle, not on an axis: when it does not move with
+    # the weights, an absorption axis collapses every point onto one vertical line.
     fig, ax = plt.subplots(figsize=(8, 5.2))
     _style(ax)
+    dws = sorted(tradeoff["delay_weight"].unique())
     for dw, g in tradeoff.groupby("delay_weight"):
         g = g.sort_values("peak_weight")
-        ax.plot(g["absorbed_mwh"], g["evening_peak_reduction_vs_uncontrolled_mw"], marker="o",
-                markersize=7, linewidth=2, label=f"delay weight {dw:g}",
-                color=["#1baf7a", "#2a78d6", "#6250d6"][list(sorted(tradeoff["delay_weight"].unique())).index(dw)])
-        last = g.iloc[-1]
-        ax.annotate(f"mean delay {last['mean_delay_min']:.0f} min", (last["absorbed_mwh"],
-                    last["evening_peak_reduction_vs_uncontrolled_mw"]), textcoords="offset points",
-                    xytext=(6, -12), fontsize=8, color=INK_2)
-    ax.set_xlabel("Curtailment-risk energy absorbed (MWh)", color=INK_2)
+        ax.plot(g["mean_delay_min"], g["evening_peak_reduction_vs_uncontrolled_mw"], marker="o",
+                markersize=8, linewidth=2, label=f"delay weight {dw:g}",
+                color=["#1baf7a", "#2a78d6", "#6250d6"][dws.index(dw)])
+    first = tradeoff[tradeoff["delay_weight"] == dws[0]].sort_values("peak_weight")
+    for _, r in first.drop_duplicates(["mean_delay_min", "evening_peak_reduction_vs_uncontrolled_mw"]).iterrows():
+        ax.annotate(f"peak weight {r['peak_weight']:g}", (r["mean_delay_min"],
+                    r["evening_peak_reduction_vs_uncontrolled_mw"]), textcoords="offset points",
+                    xytext=(8, -14), fontsize=8, color=INK_2)
+    lo, hi = tradeoff["absorbed_mwh"].min(), tradeoff["absorbed_mwh"].max()
+    ax.set_xlabel("Mean driver delay (min)", color=INK_2)
     ax.set_ylabel("Evening peak reduction vs uncontrolled (MW)", color=INK_2)
-    ax.set_title("Trade-off on curtailment-risk days, peak weight 0 to 16", loc="left", color=INK, fontsize=11)
-    ax.legend(frameon=False, fontsize=8.5)
+    ax.set_title("Peak reduction against driver delay, curtailment-risk days", loc="left",
+                 color=INK, fontsize=11, pad=20)
+    absorbed = f"{lo:.1f} MWh" if hi - lo < 0.05 else f"{lo:.1f}-{hi:.1f} MWh"
+    ax.text(0, 1.01, f"Absorbed risk energy at every weight setting: {absorbed}",
+            transform=ax.transAxes, fontsize=8.5, color=INK_2, va="bottom")
+    ax.legend(frameon=False, fontsize=8.5, loc="lower right")
     fig.tight_layout()
     fig.savefig(path, dpi=160)
     plt.close(fig)
@@ -404,14 +434,26 @@ def main() -> None:
     rcomp = pd.DataFrame(rres["metrics"]).T
     rcomp.index.name = "strategy"
     rcomp.to_csv(out / "so5_risk_days_comparison.csv")
+    per_day = pd.DataFrame()
     if len(rcomp):
         print("Risk days:")
         print(rcomp[["absorbed_mwh", "curtailment_risk_mwh", "mean_evening_peak_increase_mw",
                      "mean_delay_min", "completion_rate", "constraint_violations"]].to_string())
+        pd.DataFrame(rres["loads"]).to_csv(out / "so5_risk_days_hourly_ev_load_mw.csv",
+                                           index_label="hour_start_local")
+        per_day = absorbed_by_day(rres, central_signal)
+        per_day.to_csv(out / "so5_risk_days_by_day.csv")
     shown = rres if rres["days"] else res
     if shown["days"]:
         show = max(shown["days"], key=lambda d: risk_by_day.get(d, 0))
         plot_day_profile(show, central_signal, shown["loads"], out / "figures/so5_day_profile.png")
+    if len(per_day) and {"curtailment_aware", "solar_following"} <= set(per_day.columns):
+        # The day where following the risk beats following the sun by the most, if any.
+        diff = per_day["curtailment_aware"] - per_day["solar_following"]
+        if diff.max() > 0.5:
+            d = pd.Timestamp(diff.idxmax(), tz=TZ)
+            plot_day_profile(d, central_signal, rres["loads"],
+                             out / "figures/so5_day_profile_largest_difference.png")
 
     summary = {
         "status": "PROVISIONAL scenario results; see config/scenarios.json _status",
@@ -474,14 +516,19 @@ def main() -> None:
                                   "completion_rate": m["completion_rate"],
                                   "constraint_violations": m["constraint_violations"],
                                   "days": m["days"], "dropped_days": len(r["dropped_days"]),
-                                  "ranking_preserved": rk == base_rank if rk else None})
+                                  "ranking_preserved": rk == base_rank if rk else None,
+                                  "curtailment_aware_not_outranked": leads(rk) if rk else None})
             print(f"sensitivity {dim}={val} done")
         sens = pd.DataFrame(sens_rows)
         sens.to_csv(out / "so6_sensitivity.csv", index=False)
         if len(sens):
             plot_sensitivity(sens, out / "figures/so6_sensitivity.png")
-            preserved = sens.drop_duplicates(["dimension", "value"])["ranking_preserved"]
-            summary["so6_ranking_preserved_share"] = round(float(preserved.mean()), 3)
+            cases_df = sens.drop_duplicates(["dimension", "value"])
+            summary["so6_ranking_preserved_share"] = round(float(cases_df["ranking_preserved"].mean()), 3)
+            # A change from "tied" to "ahead" also breaks exact preservation, so report
+            # separately whether the proposed strategy is ever outranked.
+            summary["so6_curtailment_aware_not_outranked_share"] = round(
+                float(cases_df["curtailment_aware_not_outranked"].mean()), 3)
         summary["so6_reference_ranking"] = base_rank
 
     if pool:

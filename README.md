@@ -31,7 +31,7 @@ py -3 -m venv .venv
 
 If `py -3` is not found, try `python -m venv .venv`. You **do not have to activate** the virtual environment, because the commands above invoke its Python directly.
 
-Expected test result: `143 passed` (the exact run time can vary).
+Expected test result: `145 passed` (the exact run time can vary).
 
 ## Optional: download a pilot NASA POWER solar/weather dataset
 

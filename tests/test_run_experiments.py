@@ -82,3 +82,24 @@ def test_run_case_same_result_in_worker_pool():
         pooled = rx.run_case(*args, pool=pool)
     assert json.dumps(serial["metrics"], default=str) == json.dumps(pooled["metrics"], default=str)
     assert serial["metrics"]["curtailment_aware"]["constraint_violations"] == 0
+
+
+def test_leads_means_never_outranked():
+    assert rx.leads({"by_absorption": [["curtailment_aware", "solar_following"], ["uncontrolled"]],
+                     "by_evening_peak": [["curtailment_aware"], ["solar_following"]]})
+    assert not rx.leads({"by_absorption": [["solar_following"], ["curtailment_aware"]],
+                         "by_evening_peak": [["curtailment_aware"]]})
+
+
+def test_absorbed_by_day_matches_load_in_risk_hours():
+    day = pd.Timestamp("2024-03-10", tz=TZ)
+    idx = pd.date_range(day, periods=24, freq="h")
+    sig = pd.DataFrame({"nlmin_mw": 500.0, "net_load_mw": 600.0, "vre_mw": 100.0,
+                        "demand_system_mw": 1000.0, "snsp_max": np.nan}, index=idx)
+    sig.loc[idx[12], "net_load_mw"] = 450.0                     # 50 MW of risk at 12:00
+    sig["curtailment_risk_mw"] = (sig["nlmin_mw"] - sig["net_load_mw"]).clip(lower=0)
+    load = pd.Series(0.0, index=idx)
+    load[idx[12]] = 20.0
+    out = rx.absorbed_by_day({"days": [day], "loads": {"a": load}}, sig)
+    assert out.loc["2024-03-10", "risk_mwh"] == 50.0
+    assert out.loc["2024-03-10", "a"] == 20.0

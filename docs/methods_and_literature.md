@@ -25,7 +25,7 @@ station capacity and session behaviour are still tagged `provisional` in
 | Forecast benchmark | Persistence: plan on yesterday's grid signal, score on today's | Standard naive benchmark (proposal Table 3.2) | `run_experiments.py` |
 | Day-ahead forecast | Ridge regression and gradient-boosted trees on calendar, Sri Lankan holiday/Poya and lag features; a model is used only if it beats persistence | Standard short-term load-forecasting practice: calendar and lag regressors, naive benchmarks, chronological hold-out (e.g. Hong & Fan 2016) | `forecast_grid.py` |
 | Evaluation days | (a) one day per ISO week, rotating weekday: year-representative peak, delay, completion; (b) every schedulable day with risk: absorption and the weight trade-off | Stratified evaluation: a rare-event outcome needs its own stratum | `run_experiments.py` |
-| Validation | Independent constraint audit; identical sessions and grid hours across strategies; tie-aware ranking preserved across sweeps | Proposal §3.5 | `audit_schedule()`, `run_experiments.py` |
+| Validation | Independent constraint audit; identical sessions and grid hours across strategies; tie-aware ranking preserved across sweeps, and whether the proposed strategy is ever outranked (a tie becoming a win also breaks exact preservation) | Proposal §3.5 | `audit_schedule()`, `run_experiments.py` |
 
 ## 1a. Models trained (as of 2026-10-19)
 
@@ -68,7 +68,11 @@ solved or computed, not trained.
 5. **Storage:** LTGEP plans 105 MW of batteries by 2026 and 405 MW by 2029;
    they would absorb part of C(t). Risk is reported before storage.
 6. **Wind:** metered wind is used as available wind; wind curtailment is not modelled.
-7. **2024 solar additions:** the LTGEP plan starts in 2025; 2024 additions are
+7. **Declared departures:** the most sensitive input. Infeasible days rise
+   from 0 of 42 at 100% declaration to 3 at 80% and 20 at 50%, because
+   undeclared drivers charging on arrival fill the shared station connection.
+   A station-level priority rule is a possible extension.
+8. **2024 solar additions:** the LTGEP plan starts in 2025; 2024 additions are
    set to the plan's 2025 rate (200 MW). Multipliers change by less than 0.15
    for 0–400 MW.
 
