@@ -31,7 +31,7 @@ py -3 -m venv .venv
 
 If `py -3` is not found, try `python -m venv .venv`. You **do not have to activate** the virtual environment, because the commands above invoke its Python directly.
 
-Expected test result: `145 passed` (the exact run time can vary).
+Expected test result: `146 passed` (the exact run time can vary).
 
 ## Optional: download a pilot NASA POWER solar/weather dataset
 
@@ -59,6 +59,7 @@ Run from the project root once the PUCSL 2024 data are preprocessed and the NASA
 .\.venv\Scripts\python.exe scripts\forecast_grid.py
 .\.venv\Scripts\python.exe scripts\run_experiments.py --quick --workers 4   # smoke test
 .\.venv\Scripts\python.exe scripts\run_experiments.py --workers 6           # full run
+.\.venv\Scripts\python.exe scripts\benchmark_scaling.py                     # NFR1/NFR2 runtime
 ```
 
 - `build_grid_scenario.py`: boundary-corrected demand, modelled available solar, the inferred curtailment-risk signal C(t), and the LTGEP scenario years 2025–2030 (SO1/SO2).
@@ -67,6 +68,7 @@ Run from the project root once the PUCSL 2024 data are preprocessed and the NASA
 - `ev_sessions.py`: session sets, parametric now and a GMM fitted to ACN-Data with `--acn-json` (SO3).
 - `schedule_ev_charging.py`: uncontrolled, solar-following and curtailment-aware strategies, plus the constraint audit (SO4).
 - `run_experiments.py`: comparison on a weekly sample and on every risk day, weight trade-off, sensitivity, and forecast-based planning (SO5/SO6). `--workers` solves days in parallel. Outputs go to `results/experiments/`.
+- `benchmark_scaling.py`: solve time from 1,000 to 30,000 sessions on one day (NFR1, NFR2).
 
 Every assumed parameter is in `config/scenarios.json`. Values tagged `provisional` must be replaced or approved before results are reported.
 

@@ -320,3 +320,114 @@ charging baseline.
 
 **Next:** Implement charger availability and site-capacity
 constraints, followed by a constrained scheduling optimizer.
+
+## 2026-10-19 — Cited NLmin, LTGEP scenario years and full experiments (SO2, SO5, SO6)
+
+**Activity:** Replaced the uncited grid parameters with values from the CEB
+*Long Term Generation Expansion Plan 2025–2044* (LTGEP), and re-ran the full
+experiment set with corrected sweeps.
+
+**NLmin derivation (`scripts/derive_nlmin.py`, Appendix C):**
+- Cited inputs:
+  - Lakvijaya: 3 × 270 MW units, minimum operating level 150 MW each (Table 2.7, p. 2-10).
+  - Spinning reserve 5% of demand; no single unit above 25% of demand (p. 7-13).
+  - SNSP limit 75% (pp. 7-7, 7-13, 10-14).
+- Observed 2024 commitment in the 167 most stressed hours: 2 coal units online
+  in 136 of them; major hydro p10 217 MW; oil off in 77%.
+- NLmin = 2 × 150 + 217 = 517 MW → central 520 MW. Low 240 MW, high 779 MW;
+  sweep 240/380/520/650/780 MW.
+- Checks:
+  - Reserve met by coal headroom in 100% of stressed hours.
+  - Single-unit rule met in 100%.
+  - Observed 2024 operation fell below 520 MW in 0 hours. The earlier 700 MW
+    placeholder was crossed in 32 hours.
+
+**Scenario years (`build_grid_scenario.ltgep_scenario`):**
+- Each scenario year scales solar, wind, must-take and demand by multipliers
+  derived from the LTGEP base case:
+  - installed capacity at end-2023 (Table 2.1);
+  - planned additions (Table E3);
+  - net-generation forecast (Table 3.3).
+- Inferred risk (complete 2024 hours, NLmin 520 MW, SNSP 75%):
+
+  | Year | Risk energy |
+  |---|---|
+  | 2025 | 0 GWh |
+  | 2026 | 0.1 GWh |
+  | 2027 | 6.4 GWh |
+  | 2028 | 31.0 GWh |
+  | 2030 | 117.6 GWh |
+
+- SNSP first binds in 2029.
+- Central year: 2028.
+- Scaling solar alone (no demand growth) would have given 133 GWh for 2028.
+
+**Evaluation design:**
+- Weekly sample (42 days; 39 usable): year-representative peak and delay.
+- Risk-day set: all 10 usable risk days of 2028; used for absorption and the
+  weight trade-off.
+- Sweeps run on all central days. Rankings are tie-aware (0.5 MWh / 0.05 MW).
+- Days are solved in parallel (`--workers`). A test checks that the result
+  equals serial solving.
+
+**Results (10,000 sessions/day, parametric sessions — provisional):**
+- Risk days (5,265 MWh of risk):
+
+  | Strategy | Absorbed | Evening-peak increase removed | Mean delay |
+  |---|---|---|---|
+  | Uncontrolled | 445.3 MWh | — | — |
+  | Solar-following | 512.0 MWh | 28% | 44 min |
+  | Curtailment-aware | 520.5 MWh | 60% | 15 min |
+  | ML-forecast planning | 477.3 MWh | 59% | — |
+  | Persistence planning | 453.3 MWh | 56% | — |
+
+- The whole curtailment-aware vs solar-following absorption difference
+  (8.4 MWh) comes from 9 June 2024. That is a monsoon day where wind and falling
+  demand put the risk at 13:00–14:00, away from the 12:00 solar peak. On the
+  other 9 days the two strategies tie.
+- 9 of 10 risk days follow a day without risk, so persistence planning fails.
+- Weekly sample:
+  - Uncontrolled charging adds 12.8 MW to the evening peak.
+  - Solar-following and curtailment-aware absorb the same (270.2 MWh).
+  - Curtailment-aware removes 60% of the added peak (solar-following 31%), at
+    8 min mean delay (solar-following 45 min).
+- Trade-off:
+  - Absorption is 520.5 MWh at all 15 weight settings.
+  - The only trade-off is peak against delay: 0 MW at ~7 min, and the full
+    7.75 MW at ~15 min for any peak weight ≥ 0.25.
+- Sensitivity (16 settings; weekly sample):
+  - Curtailment-aware is never outranked (16 of 16).
+  - The exact ranking is kept in 11 of 16. The other 5 are curtailment-aware
+    moving from tied to ahead of solar-following (NLmin 780 MW, +18.6 MWh;
+    SNSP 0.5; years 2027 and 2030), or all strategies at zero risk (2026).
+  - The evening-peak order is CA < SF < U in every setting.
+  - Declared-departure share is the most sensitive input. Infeasible days:
+    0 of 42 at 100%, 3 at 80%, 20 at 50%. Undeclared drivers charging on
+    arrival fill the 50 kW station connection.
+- Every reported LP is optimal. Infeasible days are reported, not relaxed.
+  0 audit violations.
+- Runtime (`scripts/benchmark_scaling.py`, single process, 3 Nov 2024): all
+  optimal with 0 violations:
+
+  | Sessions | Solve time |
+  |---|---|
+  | 1,000 | 0.2 s |
+  | 3,000 | 0.8 s |
+  | 10,000 | 4.7 s |
+  | 30,000 | 31.8 s |
+
+  Growth is about sessions^1.5. NFR1 (< 60 s) and NFR2 (one order of
+  magnitude) are met.
+- Tests: 146 passed.
+
+**Limitations:**
+- NLmin awaits CEB System Control review. 2025 operation after the blackout may
+  have used a higher floor.
+- Planned battery storage is not modelled; risk is reported before storage.
+- 2024 weather is reused for every scenario year.
+- Sessions and fleet volume are still provisional.
+
+**Next:**
+- Send Appendix C to CEB for review.
+- Download the ACN-Data sessions and the PUCSL April–December 2025 workbooks.
+- Obtain fleet volumes per scenario year from Component 1.
