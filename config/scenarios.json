@@ -64,8 +64,8 @@
   },
 
   "evaluation": {
-    "day_sample": "one day per week: the first eligible day of each ISO week",
-    "sweep_days_per_month": 1
+    "day_sample": "one schedulable day per ISO week; week k prefers weekday k mod 7 so weekends are represented",
+    "sweep_days": "the same days as the central comparison"
   },
 
   "sweeps": {

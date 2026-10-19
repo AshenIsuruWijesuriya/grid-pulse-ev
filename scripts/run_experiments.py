@@ -16,11 +16,12 @@ Days
     A day is schedulable when it, the previous day (persistence forecast) and
     the early hours of the next day (overnight departures) are complete.
     central : one day per ISO week, rotating the weekday so weekends count
-    sweeps  : every fourth central day (~one per month)
+    sweeps  : the same central days (a thinner subset can miss every
+              curtailment-risk day and make strategies tie trivially)
     Days where any LP is infeasible are dropped for ALL strategies and counted.
 
 Usage
-    .venv\\Scripts\\python.exe scripts\\run_experiments.py            (full, ~30 min)
+    .venv\\Scripts\\python.exe scripts\\run_experiments.py --workers 4   (full)
     .venv\\Scripts\\python.exe scripts\\run_experiments.py --quick    (4 days, smoke test)
 Outputs go to results/experiments/. Every figure is a provisional-scenario
 result until NLmin, SNSP, fleet volume and session data are replaced.
@@ -32,6 +33,7 @@ import argparse
 import json
 import subprocess
 import time
+from concurrent.futures import Executor, ProcessPoolExecutor
 from datetime import datetime
 from pathlib import Path
 
@@ -105,29 +107,54 @@ def persistence_plan(signal: pd.DataFrame) -> pd.DataFrame:
 # One experimental case
 # --------------------------------------------------------------------------- #
 
+def solve_day(task: tuple) -> dict:
+    """Solve every strategy for one day (module level so worker processes can run it).
+
+    task = (day, sessions of that day, station kW, {strategy: (mode, planning grid)}, weights)
+    """
+    d, sd, station_kw, runs, weights = task
+    prob = sch.day_problem(d, sd, station_kw)
+    out = {}
+    for s, (mode, plan) in runs.items():
+        grid = sch.plan_grid(plan, prob.hours) if plan is not None else None
+        r = sch.run_strategy(prob, mode, grid, weights)
+        res = {"status": r["status"], "solver_s": r["solver_s"]}
+        if r["status"] in ("optimal", "simulated"):
+            full = prob.declared if s != "uncontrolled" else False
+            res.update(load=sch.hourly_load_mw(prob, r["P"]),
+                       outcomes=sch.session_outcomes(prob, r["P"]),
+                       audit=sch.audit_schedule(prob, r["P"], full))
+        out[s] = res
+    return out
+
+
 def run_case(days: list, sessions: pd.DataFrame, signal: pd.DataFrame, cfg: dict,
              strategies: list[str], weights: dict, station_kw: float,
-             plans: dict | None = None) -> dict:
+             plans: dict | None = None, pool: Executor | None = None) -> dict:
     """Run strategies on identical inputs; returns metrics and hourly loads.
 
     plans maps a strategy suffix to the signal that strategy PLANS on; every
-    strategy is SCORED on `signal`.
+    strategy is SCORED on `signal`. Days run in `pool` when one is given; the
+    result does not depend on it.
     """
     plans = dict(plans or {})
     plans.setdefault("_persistence", persistence_plan(signal))
     per = {s: {"loads": [], "outcomes": [], "audits": [], "status": [], "solver": []}
            for s in strategies}
-    kept, dropped = [], []
+    tasks = []
     for d in days:
-        sd = sessions[sessions["day"] == d.strftime("%Y-%m-%d")]
-        prob = sch.day_problem(d, sd, station_kw)
-        day_runs = {}
+        # Only the day's window of each signal travels to the worker.
+        window = slice(d - pd.offsets.Day(1), d + pd.offsets.Day(3))
+        runs = {}
         for s in strategies:
             suffix = next((k for k in FORECAST_SUFFIXES if s.endswith(k)), "")
             plan = plans[suffix] if suffix else signal
             mode = s[: len(s) - len(suffix)] if suffix else s
-            grid = sch.plan_grid(plan, prob.hours) if mode != "uncontrolled" else None
-            day_runs[s] = sch.run_strategy(prob, mode, grid, weights)
+            runs[s] = (mode, plan.loc[window] if mode != "uncontrolled" else None)
+        tasks.append((d, sessions[sessions["day"] == d.strftime("%Y-%m-%d")], station_kw, runs, weights))
+    results = pool.map(solve_day, tasks) if pool else map(solve_day, tasks)
+    kept, dropped = [], []
+    for d, day_runs in zip(days, results):
         bad = [s for s, r in day_runs.items() if r["status"] not in ("optimal", "simulated")]
         if bad:
             dropped.append({"day": str(d.date()), "strategies": bad,
@@ -135,10 +162,9 @@ def run_case(days: list, sessions: pd.DataFrame, signal: pd.DataFrame, cfg: dict
             continue
         kept.append(d)
         for s, r in day_runs.items():
-            full = prob.declared if s != "uncontrolled" else False
-            per[s]["loads"].append(sch.hourly_load_mw(prob, r["P"]))
-            per[s]["outcomes"].append(sch.session_outcomes(prob, r["P"]))
-            per[s]["audits"].append(sch.audit_schedule(prob, r["P"], full))
+            per[s]["loads"].append(r["load"])
+            per[s]["outcomes"].append(r["outcomes"])
+            per[s]["audits"].append(r["audit"])
             per[s]["status"].append(r["status"])
             per[s]["solver"].append(r["solver_s"])
     evening = tuple(cfg["grid"]["evening_hours"])
@@ -162,12 +188,27 @@ def run_case(days: list, sessions: pd.DataFrame, signal: pd.DataFrame, cfg: dict
     return {"metrics": metrics, "loads": loads, "days": kept, "dropped_days": dropped}
 
 
-def ranking(metrics: dict) -> dict:
-    """Strategy order by absorption (high first) and evening peak (low first)."""
+def ranking(metrics: dict, tol_mwh: float = 0.5, tol_mw: float = 0.05) -> dict:
+    """Strategy order by absorption (high first) and evening peak (low first).
+
+    Each rank is a group: strategies within the tolerance of the group's best
+    are tied, so solver-level differences (e.g. 0.02 MWh) do not count as a
+    ranking change in SO6.
+    """
     s = [k for k in metrics if not k.endswith(FORECAST_SUFFIXES)]
+
+    def groups(key, tol):
+        out = []
+        for k in sorted(s, key=key):
+            if out and key(k) - key(out[-1][0]) <= tol:
+                out[-1].append(k)
+            else:
+                out.append([k])
+        return [sorted(g) for g in out]
+
     return {
-        "by_absorption": sorted(s, key=lambda k: -metrics[k]["absorbed_mwh"]),
-        "by_evening_peak": sorted(s, key=lambda k: metrics[k]["mean_evening_peak_mw"]),
+        "by_absorption": groups(lambda k: -metrics[k]["absorbed_mwh"], tol_mwh),
+        "by_evening_peak": groups(lambda k: metrics[k]["mean_evening_peak_mw"], tol_mw),
     }
 
 
@@ -186,27 +227,39 @@ def _style(ax):
 
 
 def plot_day_profile(day, signal, loads, path: Path) -> None:
+    """Top: residual load and NLmin. Bottom: EV load per strategy (on the top
+    panel's scale the EV lines would overlap and hide each other)."""
     import matplotlib.pyplot as plt
     hours = pd.date_range(day, periods=30, freq="h")
     sig = signal.reindex(hours)
     x = np.arange(len(hours))
-    fig, ax = plt.subplots(figsize=(10, 5.2))
-    _style(ax)
-    ax.fill_between(x, sig["net_load_mw"], np.maximum(sig["net_load_mw"], sig["nlmin_mw"]),
-                    color="#e34948", alpha=0.18, linewidth=0, step=None,
-                    label="Curtailment risk C(t) (gap to NLmin)")
-    ax.plot(x, sig["nlmin_mw"], color=INK_2, linestyle="--", linewidth=1.2, label="NLmin (provisional)")
-    ax.plot(x, sig["net_load_mw"], color=INK, linewidth=2, label="Residual load, no EVs")
-    for s in ("uncontrolled", "solar_following", "curtailment_aware"):
-        L = loads[s].reindex(hours, fill_value=0.0)
-        ax.plot(x, sig["net_load_mw"] + L, color=COLORS[s], linewidth=2, label=f"+ EVs: {LABELS[s]}")
-    ax.set_xticks(x[::3], [h.strftime("%H:%M") for h in hours[::3]])
-    ax.set_ylabel("MW", color=INK_2)
-    ax.set_title(f"Residual load for the dispatchable fleet, {day:%a %d %b %Y}",
-                 loc="left", color=INK, fontsize=11)
-    ax.legend(frameon=False, fontsize=8.5, loc="upper left", ncol=2)
-    fig.text(0.01, 0.01, "Inferred scenario signal, not measured curtailment. Provisional parameters.",
-             fontsize=7.5, color=INK_2)
+    risk = (sig["curtailment_risk_mw"] > 0).to_numpy()
+    fig, (top, bot) = plt.subplots(2, 1, figsize=(10, 7), sharex=True,
+                                   gridspec_kw={"height_ratios": [1.15, 1]})
+    for ax in (top, bot):
+        _style(ax)
+        for i in np.flatnonzero(risk):
+            ax.axvspan(i - 0.5, i + 0.5, color="#e34948", alpha=0.10, linewidth=0)
+    top.fill_between(x, sig["net_load_mw"], np.maximum(sig["net_load_mw"], sig["nlmin_mw"]),
+                     color="#e34948", alpha=0.25, linewidth=0,
+                     label="Curtailment risk C(t) (gap to NLmin)")
+    top.plot(x, sig["nlmin_mw"], color=INK_2, linestyle="--", linewidth=1.2, label="NLmin")
+    top.plot(x, sig["net_load_mw"], color=INK, linewidth=2, label="Residual load, no EVs")
+    top.set_ylabel("MW", color=INK_2)
+    top.set_title(f"Residual load for the dispatchable fleet, {day:%a %d %b %Y}",
+                  loc="left", color=INK, fontsize=11)
+    top.legend(frameon=False, fontsize=8.5, loc="upper left")
+    for s in ("uncontrolled", "solar_following", "curtailment_aware", "curtailment_aware_ml"):
+        if s in loads:
+            bot.plot(x, loads[s].reindex(hours, fill_value=0.0), color=COLORS[s], linewidth=2,
+                     label=LABELS[s])
+    bot.set_ylabel("EV charging load (MW)", color=INK_2)
+    bot.set_title("EV load by strategy (shaded: hours with curtailment risk)", loc="left",
+                  color=INK, fontsize=10)
+    bot.legend(frameon=False, fontsize=8.5, loc="upper left")
+    bot.set_xticks(x[::3], [h.strftime("%H:%M") for h in hours[::3]])
+    fig.text(0.01, 0.01, "Inferred scenario signal, not measured curtailment. Provisional fleet and "
+             "session parameters.", fontsize=7.5, color=INK_2)
     fig.tight_layout(rect=(0, 0.03, 1, 1))
     fig.savefig(path, dpi=160)
     plt.close(fig)
@@ -274,8 +327,10 @@ def main() -> None:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--config", type=Path, default=bgs.DEFAULT_CONFIG)
     ap.add_argument("--acn-json", type=Path, help="ACN-Data JSON; switches sessions to a fitted GMM")
-    ap.add_argument("--quick", action="store_true", help="4 central days, 2 sweep days")
+    ap.add_argument("--quick", action="store_true", help="4 days, smoke test")
     ap.add_argument("--skip-sweeps", action="store_true")
+    ap.add_argument("--workers", type=int, default=1,
+                    help="worker processes that solve days in parallel")
     ap.add_argument("--outdir", type=Path, default=PROJECT_ROOT / "results/experiments")
     args = ap.parse_args()
 
@@ -286,9 +341,9 @@ def main() -> None:
     base = load_base(cfg)
     days_all = schedulable_days(base)
     central_days = sample_days(days_all)
-    sweep_days = central_days[::4]
+    sweep_days = central_days
     if args.quick:
-        central_days, sweep_days = central_days[13:17], central_days[13:15]
+        central_days = sweep_days = central_days[13:17]
     out = args.outdir
     (out / "figures").mkdir(parents=True, exist_ok=True)
 
@@ -325,11 +380,15 @@ def main() -> None:
         strategies.append("curtailment_aware_ml")
     else:
         print("No forecast file; run forecast_grid.py to add the ML-forecast strategy.")
+    pool = ProcessPoolExecutor(args.workers) if args.workers > 1 else None
     res = run_case(central_days, sessions, central_signal, cfg, strategies, c["weights"],
-                   c["station_capacity_kw"], plans)
+                   c["station_capacity_kw"], plans, pool)
     comp = pd.DataFrame(res["metrics"]).T
     comp.index.name = "strategy"
     comp.to_csv(out / "so5_comparison.csv")
+    if res["loads"]:
+        pd.DataFrame(res["loads"]).to_csv(out / "so5_hourly_ev_load_mw.csv",
+                                          index_label="hour_start_local")
     print(comp[["absorbed_mwh", "unabsorbed_mwh", "mean_evening_peak_increase_mw",
                 "evening_peak_reduction_vs_uncontrolled_mw", "completion_rate",
                 "mean_delay_min", "p95_delay_min", "constraint_violations"]].to_string())
@@ -357,7 +416,8 @@ def main() -> None:
         for pw in sw["peak_weight"]:
             for dw in sw["delay_weight"]:
                 r = run_case(sweep_days, sessions, central_signal, cfg, ["uncontrolled", "curtailment_aware"],
-                             {"curtailment": 1.0, "peak": pw, "delay": dw}, c["station_capacity_kw"])
+                             {"curtailment": 1.0, "peak": pw, "delay": dw}, c["station_capacity_kw"],
+                             pool=pool)
                 m = r["metrics"].get("curtailment_aware")
                 if m:
                     rows.append({"peak_weight": pw, "delay_weight": dw, **{k: m[k] for k in (
@@ -380,12 +440,12 @@ def main() -> None:
                      evs.build_session_set(sorted(set(central_days) | set(sweep_days)), cfg, seed, gmm, v))
                     for v in sw["declared_departure_fraction"]])
         for dim, val, sig, sess in cases:
-            r = run_case(sweep_days, sess, sig, cfg, three, c["weights"], c["station_capacity_kw"])
+            r = run_case(sweep_days, sess, sig, cfg, three, c["weights"], c["station_capacity_kw"],
+                         pool=pool)
             rk = ranking(r["metrics"]) if r["metrics"] else None
             if base_rank is None and rk:
-                central_r = run_case(sweep_days, sessions, central_signal, cfg, three, c["weights"],
-                                     c["station_capacity_kw"])
-                base_rank = ranking(central_r["metrics"])
+                # sweep_days are the central days, so the SO5 run is the reference.
+                base_rank = ranking({s: res["metrics"][s] for s in three})
             for s, m in r["metrics"].items():
                 sens_rows.append({"dimension": dim, "value": val, "strategy": s,
                                   "absorbed_mwh": m["absorbed_mwh"],
@@ -405,6 +465,8 @@ def main() -> None:
             summary["so6_ranking_preserved_share"] = round(float(preserved.mean()), 3)
         summary["so6_reference_ranking"] = base_rank
 
+    if pool:
+        pool.shutdown()
     summary["runtime_s"] = round(time.perf_counter() - t_start, 1)
     (out / "run_summary.json").write_text(json.dumps(summary, indent=2, default=str), encoding="utf-8")
     print(f"Done in {summary['runtime_s']} s. Outputs in {out}")

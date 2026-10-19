@@ -47,5 +47,38 @@ def test_ranking_orders_absorption_and_peak():
          "curtailment_aware": {"absorbed_mwh": 3, "mean_evening_peak_mw": 10},
          "curtailment_aware_persistence": {"absorbed_mwh": 9, "mean_evening_peak_mw": 1}}
     r = rx.ranking(m)
-    assert r["by_absorption"] == ["curtailment_aware", "solar_following", "uncontrolled"]
-    assert r["by_evening_peak"] == ["curtailment_aware", "solar_following", "uncontrolled"]
+    assert r["by_absorption"] == [["curtailment_aware"], ["solar_following"], ["uncontrolled"]]
+    assert r["by_evening_peak"] == [["curtailment_aware"], ["solar_following"], ["uncontrolled"]]
+
+
+def test_ranking_groups_ties():
+    m = {"uncontrolled": {"absorbed_mwh": 265.3, "mean_evening_peak_mw": 30.0},
+         "solar_following": {"absorbed_mwh": 292.85, "mean_evening_peak_mw": 20.0},
+         "curtailment_aware": {"absorbed_mwh": 292.87, "mean_evening_peak_mw": 19.98}}
+    r = rx.ranking(m)
+    assert r["by_absorption"] == [["curtailment_aware", "solar_following"], ["uncontrolled"]]
+    assert r["by_evening_peak"] == [["curtailment_aware", "solar_following"], ["uncontrolled"]]
+    assert rx.ranking(m, tol_mw=0.01)["by_evening_peak"][0] == ["curtailment_aware"]
+
+
+def test_run_case_same_result_in_worker_pool():
+    from concurrent.futures import ThreadPoolExecutor
+    import json
+    import build_grid_scenario as bgs
+    import ev_sessions as evs
+    day = pd.Timestamp("2024-03-10", tz=TZ)
+    idx = pd.date_range(day - pd.offsets.Day(2), periods=24 * 5, freq="h")
+    solar = np.clip(np.sin((idx.hour - 6) / 12 * np.pi), 0, None) * 900.0
+    base = pd.DataFrame({"demand_system_mw": 1500.0, "solar_available_mw": solar,
+                         "wind_mw": 0.0, "must_take_mw": 0.0}, index=idx)
+    sig = bgs.scenario_signal(base, nlmin_mw=800.0)
+    cfg = bgs.load_config(bgs.DEFAULT_CONFIG)
+    cfg["central"]["sessions_per_day"] = 40
+    sess = evs.build_session_set([day], cfg, 1)
+    args = ([day], sess, sig, cfg, ["uncontrolled", "curtailment_aware"],
+            cfg["central"]["weights"], 50.0)
+    serial = rx.run_case(*args)
+    with ThreadPoolExecutor(2) as pool:
+        pooled = rx.run_case(*args, pool=pool)
+    assert json.dumps(serial["metrics"], default=str) == json.dumps(pooled["metrics"], default=str)
+    assert serial["metrics"]["curtailment_aware"]["constraint_violations"] == 0
