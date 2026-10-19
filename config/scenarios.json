@@ -1,0 +1,64 @@
+{
+  "_status": "PROVISIONAL. Every value tagged 'provisional' is a placeholder for a sweep, NOT a cited or approved parameter. Replace it from Appendix C (docs/nlmin_derivation.md), Component 1, or supervisor decision before reporting results.",
+
+  "grid": {
+    "year": 2024,
+    "hourly_net_demand": "data/processed/grid/pucsl_2024_hourly_net_demand.csv",
+    "dispatch_15min": "data/processed/grid/pucsl_2024_consolidated_dispatch_15min.csv",
+    "ceb_monthly_reference": "docs/ceb_2024_monthly_reference.csv",
+    "nasa_sites": {
+      "colombo":    "data/processed/solar/nasa_power_colombo_20231231_20250101_utc.csv",
+      "hambantota": "data/processed/solar/nasa_power_hambantota_20231231_20250101_utc.csv",
+      "jaffna":     "data/processed/solar/nasa_power_jaffna_20231231_20250101_utc.csv"
+    },
+    "must_take_columns": ["mini_hydro_mw", "biomass_mw"],
+    "peak_band_fraction": 0.03,
+    "evening_hours": [17, 23]
+  },
+
+  "central": {
+    "nlmin_mw": 700,
+    "nlmin_source": "provisional: inside the observed 2024 dispatchable range (min 565 MW, p01 774 MW); replace with Appendix C derivation",
+    "snsp_max": null,
+    "snsp_source": "provisional: disabled until CEB confirms its inertia metric",
+    "solar_multiplier": 1.5,
+    "solar_multiplier_source": "provisional: illustrative growth over 2024 installed solar",
+    "wind_multiplier": 1.0,
+    "sessions_per_day": 10000,
+    "sessions_per_day_source": "provisional: national public sessions/day; replace with Component 1 fleet scenario",
+    "sessions_per_station_per_day": 8,
+    "station_capacity_kw": 50,
+    "station_source": "provisional: 50 kW site connection shared by its charge points",
+    "declared_departure_fraction": 0.8,
+    "kwh_per_km": 0.16,
+    "weights": {"curtailment": 1.0, "peak": 1.0, "delay": 0.01}
+  },
+
+  "sessions": {
+    "source": "parametric",
+    "source_note": "parametric = uncalibrated uniform draws (fallback). Set to 'gmm' with --acn-json once ACN-Data is downloaded.",
+    "parametric": {
+      "arrival_hour_range": [7.0, 21.0],
+      "dwell_hours_range": [2.0, 8.0],
+      "energy_kwh_range": [6.0, 32.0],
+      "charger_kw": [3.6, 7.2, 11.0],
+      "charger_probability": [0.10, 0.75, 0.15]
+    },
+    "gmm_max_components": 8,
+    "seed": 42
+  },
+
+  "evaluation": {
+    "day_sample": "one day per week: the first eligible day of each ISO week",
+    "sweep_days_per_month": 1
+  },
+
+  "sweeps": {
+    "nlmin_mw": [500, 600, 700, 800, 900],
+    "snsp_max": [null, 0.5, 0.65],
+    "solar_multiplier": [1.0, 1.5, 2.0],
+    "declared_departure_fraction": [0.5, 0.8, 1.0],
+    "peak_weight": [0.0, 0.25, 1.0, 4.0, 16.0],
+    "delay_weight": [0.0, 0.01, 0.1]
+  }
+}

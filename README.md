@@ -3,7 +3,7 @@
 **Project:** J26-DS-331  
 **Approved individual topic:** Optimizing Public EV Charging Schedules for Renewable-Curtailment Absorption and Peak Reduction in Sri Lanka
 
-This is **Stage 1: setup and data-feasibility audit**, not a completed system. No measured CEB data is included or claimed. The example grid data under `tests/fixtures/` is **synthetic** and is strictly for testing.
+The full SO1–SO6 pipeline is implemented with **provisional parameters** (see `config/scenarios.json` and `docs/methods_and_literature.md`). The grid data are PUCSL 15-minute dispatch reports reconciled to CEB published totals. Raw data are not committed. The example grid data under `tests/fixtures/` is **synthetic** and is strictly for testing.
 
 ## Research roadmap mapped to the approved proposal
 
@@ -31,7 +31,7 @@ py -3 -m venv .venv
 
 If `py -3` is not found, try `python -m venv .venv`. You **do not have to activate** the virtual environment, because the commands above invoke its Python directly.
 
-Expected test result: `4 passed` (the exact run time can vary).
+Expected test result: `135 passed` (the exact run time can vary).
 
 ## Optional: download a pilot NASA POWER solar/weather dataset
 
@@ -47,6 +47,24 @@ This requests a **single representative geographic point**, not Sri Lanka's nati
 - API timestamps are explicitly requested in **UTC**. The CSV contains both `timestamp_utc` and `timestamp_sri_lanka` with offsets.
 - Irradiance is a **solar-resource variable**, *not* measured solar electricity generation; do not substitute it directly for `solar_actual_mw` in a grid power balance.
 - To model the nation we will later justify representative locations, installed PV capacities, and conversion/calibration assumptions.
+
+## Research pipeline (SO1–SO6)
+
+Run from the project root once the PUCSL 2024 data are preprocessed and the NASA POWER 2024 files are downloaded (see `docs/data_inventory.csv`):
+
+```powershell
+.\.venv\Scripts\python.exe scripts\build_hourly_net_demand.py --input data\processed\grid\pucsl_2024_consolidated_dispatch_15min.csv --year 2024
+.\.venv\Scripts\python.exe scripts\build_grid_scenario.py
+.\.venv\Scripts\python.exe scripts\run_experiments.py --quick     # smoke test, ~8 min
+.\.venv\Scripts\python.exe scripts\run_experiments.py             # full run, ~50 min
+```
+
+- `build_grid_scenario.py`: boundary-corrected demand, modelled available solar, and the inferred curtailment-risk signal C(t) (SO1/SO2).
+- `ev_sessions.py`: session sets, parametric now and a GMM fitted to ACN-Data with `--acn-json` (SO3).
+- `schedule_ev_charging.py`: uncontrolled, solar-following and curtailment-aware strategies, plus the constraint audit (SO4).
+- `run_experiments.py`: comparison, weight trade-off, sensitivity and persistence forecast (SO5/SO6). Outputs go to `results/experiments/`.
+
+Every assumed parameter is in `config/scenarios.json`. Values tagged `provisional` must be replaced or approved before results are reported.
 
 ## Grid-data schema and audit
 

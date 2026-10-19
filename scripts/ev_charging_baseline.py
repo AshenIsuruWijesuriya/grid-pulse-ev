@@ -40,9 +40,13 @@ def generate_synthetic_sessions(
             # Dwell: 2 to 8 hours, multiples of 15 minutes.
             dwell_slots = int(rng.integers(8, 33))
             departure = arrival + timedelta(minutes=dwell_slots * STEP_MINUTES)
-            # Uncalibrated, illustrative ranges; deliberately permits some unmet energy.
-            requested = round(float(rng.uniform(6.0, 32.0)), 2)
+            # Uncalibrated, illustrative ranges. The request is capped at what the
+            # charger can deliver while plugged in, otherwise the session is
+            # infeasible for every strategy and SO4's 100% completion is impossible.
+            drawn = float(rng.uniform(6.0, 32.0))
             max_kw = float(rng.choice([3.6, 7.2, 11.0], p=[0.10, 0.75, 0.15]))
+            deliverable = max_kw * dwell_slots * STEP_HOURS
+            requested = round(min(drawn, deliverable), 2)
             records.append({
                 "session_id": f"syn-{day + 1:02d}-{j + 1:03d}",
                 "arrival_local": arrival.isoformat(),
@@ -50,6 +54,7 @@ def generate_synthetic_sessions(
                 "energy_request_kwh": requested,
                 "max_power_kw": max_kw,
                 "data_origin": "synthetic_illustrative_not_calibrated",
+                "energy_capped": drawn > deliverable,
             })
     return pd.DataFrame(records)
 

@@ -17,11 +17,13 @@ arithmetic is meant to be checked by a CEB System Control Center engineer
 
 | Symbol | Definition | Source in repo |
 |---|---|---|
-| D(t) | `total_dispatch_reported_mw`, PUCSL 15-minute report. Transmission-level dispatch, **net of behind-the-meter rooftop PV**. Not verified as national demand. | `scripts/preprocess_pucsl_dispatch.py` |
-| R(t) | `solar_mw + wind_mw` (centrally metered VRE only) | same |
-| NL(t) | D(t) − R(t). Major hydro is **not** subtracted (dispatchable). | `src/grid_model/net_load.py` |
+| D(t) | `total_dispatch_reported_mw`, PUCSL 15-minute report. Excludes rooftop and other embedded generation: 83% of the 2024 daily-vs-15-minute gap is solar, matching CEB rooftop energy. | `scripts/preprocess_pucsl_dispatch.py` |
+| D_sys(t) | D(t) plus embedded generation, each source rescaled to CEB 2024 monthly energy. Full-year equivalent 16,786 GWh vs CEB net generation 16,802 GWh (−0.1%). | `scripts/build_grid_scenario.py` |
+| R(t) | Available VRE. Solar is modelled from NASA POWER irradiance (Colombo, Hambantota, Jaffna) scaled to CEB monthly grid + rooftop energy. Wind is metered wind × the CEB/PUCSL monthly ratio. | same |
+| MT(t) | Must-take: mini hydro (run-of-river) + biomass, rescaled to CEB monthly energy | same |
+| NL(t) | D_sys − R − MT: the load left for coal, oil and major hydro. Major hydro is **not** subtracted (dispatchable). With multipliers at 1 this equals observed dispatchable generation. | `scenario_signal()` |
 | NLmin | Minimum feasible residual dispatch, under unit-commitment, plant minima, reserve and inertia constraints (§3–§6); scenario-dependent | this worksheet |
-| C(t) | max(0, NLmin − NL(t)), an inferred risk proxy (§9) | not yet implemented |
+| C(t) | max(0, NLmin − NL(t), R(t) − SNSP·D_sys(t)), an inferred risk proxy (§9) | `scenario_signal()`; parameters provisional |
 
 ## 3. Minimum stable generation of the must-run fleet
 
@@ -54,6 +56,12 @@ their figure is reserve held *above* MSG (adds to NLmin) or within it.
 | Minimum number of synchronised units, or minimum system inertia (MWs) | | |
 | Equivalent MW of synchronous generation | | |
 | Overlap with §3 (do not double-count units already must-run) | | |
+
+Island operators often state this requirement as a **system non-synchronous
+penetration (SNSP) limit** or a **minimum number of synchronous units**, not
+in MW (EirGrid operational constraints). The code supports an SNSP limit
+(`snsp_max`); ask CEB System Control which form, and which value, it uses.
+CEB's April 2025 statements describe inertia support as a percentage.
 
 ## 6. Constrained derivation (not a sum of independent MW addends)
 
@@ -92,34 +100,40 @@ limits**: they show where the system *did* run, not where it *could not* go.
 **Quality filtering (recomputed 2026-10-15):** the 1,263 `review_required`
 2024 intervals are now excluded, as are 2024 days whose midday or overnight
 window is entirely flagged (2024-01-20, 05-13, 05-31, 06-14, 08-11, 11-11). The
-values below did not change materially after filtering. **The 2025 file
-predates interval-quality flagging (`legacy_unflagged`), so the 2025 column is
-unaudited** until January–March 2025 are re-imported with the current
-preprocessor.
+values below did not change materially after filtering. January–March 2025
+was re-imported with the current preprocessor on 2026-10-15 (54 flagged
+intervals excluded), so both columns are quality-filtered.
 
-| Quantity | 2024 (quality-filtered) | 2025 Jan–Mar 18 (unaudited) |
+| Quantity | 2024 (quality-filtered) | 2025 Jan–Mar 18 (quality-filtered) |
 |---|---:|---:|
 | Minimum NL proxy, 15-min | 662 MW (2024-09-22 10:30) | 696 MW (2025-02-04 13:00) |
 | 1st percentile NL proxy | 944 MW | 847 MW |
 | Minimum dispatchable (coal + oil + major hydro) | 565 MW | 548 MW |
-| 1st percentile dispatchable | 774 MW | 751 MW |
+| 1st percentile dispatchable | 774 MW | 749 MW |
 
 Exploratory coal-commitment results in the lowest 2% of **reported midday
-dispatch** (168 intervals, pooled, after quality filtering):
+dispatch** (166 intervals, pooled, after quality filtering):
 
 - Coal output in the record clusters at multiples of ~273 MW net (p99 / 3
   units), consistent with three units. In stressed intervals, an estimated
-  **two units** were online in 57–100% of intervals, depending on the
+  **two units** were online in 56–100% of intervals, depending on the
   commitment window.
 - Empirical per-unit lower quantile: **154–156 MW net**. Computed using
   inferred unit commitment; not a verified technical limit.
-- Mean headroom estimates: **74 MW** (2 h window), **60 MW** (4 h), **20 MW**
-  (8 h), **12 MW** (24 h). Rolling-window commitment is a heuristic, not a
+- Mean headroom estimates: **74 MW** (2 h window), **60 MW** (4 h), **19 MW**
+  (8 h), **11 MW** (24 h). Rolling-window commitment is a heuristic, not a
   bound, so these are **sensitivity estimates, not upper or lower bounds**. Do
   not report them as physical limits or validated headroom.
 - Oil was effectively off (< 5 MW) in about half the stressed intervals. Mean
   metered solar was 65 MW vs 66 MW typical, so there is no visible reduction of
   utility-scale solar.
+
+**Hourly cross-check (boundary-corrected NL, 2026-10-19):** the minimum
+hourly observed dispatchable generation in 2024 was 575.5 MW (p01 775 MW). At
+a provisional NLmin of 700 MW, observed operation fell below the floor in 32
+hours (86% of them 10:00–15:00, mostly weekends). Either the secure floor in
+2024 was at or below about 575 MW, or those hours were operated below a
+nominal floor. Use this bound when choosing the §8 sweep range.
 
 **Reading:** the observed low net-dispatch proxy provides a consistency check,
 not a verified physical boundary. If a proposed secure constraint conflicts
