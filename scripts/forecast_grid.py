@@ -200,9 +200,7 @@ def main() -> None:
               + f"  -> {best[t]}")
 
     # Decision quality: does the forecast find the risk hours?
-    c = cfg["central"]
-    sig_args = dict(nlmin_mw=c["nlmin_mw"], solar_multiplier=c["solar_multiplier"],
-                    wind_multiplier=c["wind_multiplier"], snsp_max=c["snsp_max"])
+    sig_args = bgs.scenario_kwargs(cfg)
     actual_sig = bgs.scenario_signal(base, **sig_args)
     test_mask = month.isin(TEST_MONTHS) & usable
     decision = {}

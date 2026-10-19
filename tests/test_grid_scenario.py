@@ -61,6 +61,41 @@ def test_scenario_net_load_and_floor_risk():
     assert s2.loc[noon, "curtailment_risk_mw"] == pytest.approx(900 - 150)
 
 
+def test_demand_and_must_take_multipliers():
+    b = _base()
+    s = bgs.scenario_signal(b, nlmin_mw=900, demand_multiplier=1.2, must_take_multiplier=1.5)
+    noon = s.index[12]
+    assert s.loc[noon, "demand_system_mw"] == pytest.approx(1800)
+    assert s.loc[noon, "net_load_mw"] == pytest.approx(1800 - 600 - 50 - 150)
+
+
+SY = {"installed_end_2023_mw": {"solar": 1000, "wind": 200, "must_take": 400},
+      "additions_2024_mw": {"solar": 200, "wind": 0, "must_take": 0},
+      "additions_mw": {"solar": {"2025": 100, "2026": 300}, "wind": {"2025": 0, "2026": 100},
+                       "must_take": {"2025": 0, "2026": 0}},
+      "net_generation_2024_gwh": 16000, "net_generation_forecast_gwh": {"2025": 16800, "2026": 17600}}
+
+
+def test_ltgep_scenario_mid_year_capacity():
+    m = bgs.ltgep_scenario(SY, 2026)
+    # mid-2026 solar = 1000 + 200 + 100 + 300/2 = 1450; mid-2024 = 1000 + 200/2 = 1100
+    assert m["solar_multiplier"] == pytest.approx(1450 / 1100, abs=1e-4)
+    assert m["wind_multiplier"] == pytest.approx(250 / 200)
+    assert m["must_take_multiplier"] == 1.0
+    assert m["demand_multiplier"] == pytest.approx(1.1)
+    assert bgs.ltgep_scenario(SY, 2024)["solar_multiplier"] == 1.0
+    with pytest.raises(ValueError):
+        bgs.ltgep_scenario(SY, 2031)
+
+
+def test_scenario_kwargs_from_config():
+    cfg = bgs.load_config(bgs.DEFAULT_CONFIG)
+    kw = bgs.scenario_kwargs(cfg, nlmin_mw=300)
+    assert kw["nlmin_mw"] == 300 and kw["snsp_max"] == cfg["central"]["snsp_max"]
+    assert kw["solar_multiplier"] > 1 and kw["demand_multiplier"] > 1
+    assert bgs.scenario_kwargs(cfg, 2024)["solar_multiplier"] == 1.0
+
+
 def test_snsp_term_and_max_of_constraints():
     b = _base()
     s = bgs.scenario_signal(b, nlmin_mw=0, snsp_max=0.3)

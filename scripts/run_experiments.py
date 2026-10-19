@@ -15,9 +15,13 @@ Strategies
 Days
     A day is schedulable when it, the previous day (persistence forecast) and
     the early hours of the next day (overnight departures) are complete.
-    central : one day per ISO week, rotating the weekday so weekends count
-    sweeps  : the same central days (a thinner subset can miss every
-              curtailment-risk day and make strategies tie trivially)
+    central   : one day per ISO week, rotating the weekday so weekends count;
+                year-representative peak, delay and completion
+    risk days : every schedulable day with curtailment risk in the central
+                scenario year; the absorption comparison and the weight
+                trade-off (absorption only differs where there is risk)
+    sweeps    : the central days (a thinner subset can miss every risk day
+                and make strategies tie trivially)
     Days where any LP is infeasible are dropped for ALL strategies and counted.
 
 Usage
@@ -280,7 +284,7 @@ def plot_tradeoff(tradeoff: pd.DataFrame, path: Path) -> None:
                     xytext=(6, -12), fontsize=8, color=INK_2)
     ax.set_xlabel("Curtailment-risk energy absorbed (MWh)", color=INK_2)
     ax.set_ylabel("Evening peak reduction vs uncontrolled (MW)", color=INK_2)
-    ax.set_title("Trade-off from sweeping the peak weight (0 to 16)", loc="left", color=INK, fontsize=11)
+    ax.set_title("Trade-off on curtailment-risk days, peak weight 0 to 16", loc="left", color=INK, fontsize=11)
     ax.legend(frameon=False, fontsize=8.5)
     fig.tight_layout()
     fig.savefig(path, dpi=160)
@@ -353,19 +357,22 @@ def main() -> None:
         gmm = evs.fit_gmm(acn, cfg["sessions"]["gmm_max_components"], seed)
         print(f"GMM fitted on {len(acn)} ACN-Data sessions, {gmm.n_components} components")
 
-    def signal_for(nlmin=None, solar=None, snsp="central"):
-        return bgs.scenario_signal(
-            base, c["nlmin_mw"] if nlmin is None else nlmin,
-            c["solar_multiplier"] if solar is None else solar, c["wind_multiplier"],
-            c["snsp_max"] if snsp == "central" else snsp, cfg["grid"]["peak_band_fraction"])
+    def signal_for(year=None, **override):
+        return bgs.scenario_signal(base, **bgs.scenario_kwargs(cfg, year, **override))
 
-    sessions = evs.build_session_set(sorted(set(central_days) | set(sweep_days)), cfg, seed, gmm)
+    central_signal = signal_for()
+    risk_by_day = central_signal["curtailment_risk_mw"].groupby(central_signal.index.normalize()).sum()
+    risk_days = [d for d in days_all if risk_by_day.get(d, 0) > 0]
+    if args.quick:
+        risk_days = risk_days[:2]
+    all_days = sorted(set(central_days) | set(sweep_days) | set(risk_days))
+    sessions = evs.build_session_set(all_days, cfg, seed, gmm)
     plaus = evs.plausibility(sessions, c["kwh_per_km"])
-    print(f"{len(days_all)} schedulable days; central sample {len(central_days)}, sweeps {len(sweep_days)}")
+    print(f"{len(days_all)} schedulable days; central sample {len(central_days)}, "
+          f"risk days {len(risk_days)}, sweeps {len(sweep_days)}")
     print("Sessions:", json.dumps(plaus))
 
     # SO5 central comparison
-    central_signal = signal_for()
     strategies, plans = list(STRATEGIES), {}
     fpath = PROJECT_ROOT / "data/processed/grid" / f"grid_forecast_{cfg['grid']['year']}_hourly.csv"
     if fpath.is_file():
@@ -374,9 +381,7 @@ def main() -> None:
         fbase = base.copy()
         for col in ("demand_system_mw", "solar_available_mw", "wind_mw", "must_take_mw"):
             fbase[col] = fc[col].reindex(base.index)
-        plans["_ml"] = bgs.scenario_signal(
-            fbase, c["nlmin_mw"], c["solar_multiplier"], c["wind_multiplier"],
-            c["snsp_max"], cfg["grid"]["peak_band_fraction"])
+        plans["_ml"] = bgs.scenario_signal(fbase, **bgs.scenario_kwargs(cfg))
         strategies.append("curtailment_aware_ml")
     else:
         print("No forecast file; run forecast_grid.py to add the ML-forecast strategy.")
@@ -392,21 +397,35 @@ def main() -> None:
     print(comp[["absorbed_mwh", "unabsorbed_mwh", "mean_evening_peak_increase_mw",
                 "evening_peak_reduction_vs_uncontrolled_mw", "completion_rate",
                 "mean_delay_min", "p95_delay_min", "constraint_violations"]].to_string())
-    if res["days"]:
-        risk_by_day = central_signal["curtailment_risk_mw"].groupby(
-            central_signal.index.normalize()).sum()
-        show = max(res["days"], key=lambda d: risk_by_day.get(d, 0))
-        plot_day_profile(show, central_signal, res["loads"], out / "figures/so5_day_profile.png")
+
+    # SO5 on every risk day: where absorption can differ at all
+    rres = run_case(risk_days, sessions, central_signal, cfg, strategies, c["weights"],
+                    c["station_capacity_kw"], plans, pool)
+    rcomp = pd.DataFrame(rres["metrics"]).T
+    rcomp.index.name = "strategy"
+    rcomp.to_csv(out / "so5_risk_days_comparison.csv")
+    if len(rcomp):
+        print("Risk days:")
+        print(rcomp[["absorbed_mwh", "curtailment_risk_mwh", "mean_evening_peak_increase_mw",
+                     "mean_delay_min", "completion_rate", "constraint_violations"]].to_string())
+    shown = rres if rres["days"] else res
+    if shown["days"]:
+        show = max(shown["days"], key=lambda d: risk_by_day.get(d, 0))
+        plot_day_profile(show, central_signal, shown["loads"], out / "figures/so5_day_profile.png")
 
     summary = {
         "status": "PROVISIONAL scenario results; see config/scenarios.json _status",
         "run_at": datetime.now().isoformat(timespec="seconds"),
         "git_commit": git_commit(),
         "config": cfg,
+        "scenario": bgs.ltgep_scenario(cfg["scenario_years"], c["scenario_year"]),
         "session_plausibility": plaus,
         "central_days": [str(d.date()) for d in res["days"]],
         "dropped_days": res["dropped_days"],
         "so5_ranking": ranking(res["metrics"]),
+        "risk_days": [str(d.date()) for d in rres["days"]],
+        "risk_days_dropped": rres["dropped_days"],
+        "so5_risk_days_ranking": ranking(rres["metrics"]),
     }
 
     if not args.skip_sweeps:
@@ -415,7 +434,7 @@ def main() -> None:
         rows = []
         for pw in sw["peak_weight"]:
             for dw in sw["delay_weight"]:
-                r = run_case(sweep_days, sessions, central_signal, cfg, ["uncontrolled", "curtailment_aware"],
+                r = run_case(risk_days, sessions, central_signal, cfg, ["uncontrolled", "curtailment_aware"],
                              {"curtailment": 1.0, "peak": pw, "delay": dw}, c["station_capacity_kw"],
                              pool=pool)
                 m = r["metrics"].get("curtailment_aware")
@@ -432,12 +451,12 @@ def main() -> None:
 
         base_rank = None
         sens_rows = []
-        cases = ([("NLmin (MW)", v, signal_for(nlmin=v), sessions) for v in sw["nlmin_mw"]]
-                 + [("SNSP limit", "off" if v is None else v, signal_for(snsp=v), sessions)
+        cases = ([("NLmin (MW)", v, signal_for(nlmin_mw=v), sessions) for v in sw["nlmin_mw"]]
+                 + [("SNSP limit", "off" if v is None else v, signal_for(snsp_max=v), sessions)
                     for v in sw["snsp_max"]]
-                 + [("Solar multiplier", v, signal_for(solar=v), sessions) for v in sw["solar_multiplier"]]
+                 + [("Scenario year", v, signal_for(year=v), sessions) for v in sw["scenario_year"]]
                  + [("Declared departure share", v, central_signal,
-                     evs.build_session_set(sorted(set(central_days) | set(sweep_days)), cfg, seed, gmm, v))
+                     evs.build_session_set(all_days, cfg, seed, gmm, v))
                     for v in sw["declared_departure_fraction"]])
         for dim, val, sig, sess in cases:
             r = run_case(sweep_days, sess, sig, cfg, three, c["weights"], c["station_capacity_kw"],

@@ -31,14 +31,32 @@
     "stress_quantile": 0.02
   },
 
+  "scenario_years": {
+    "_note": "CEB Long Term Generation Expansion Plan 2025-2044 (LTGEP), base case. Used by build_grid_scenario.ltgep_scenario.",
+    "installed_end_2023_mw": {"solar": 953, "wind": 267, "must_take": 473},
+    "installed_source": "LTGEP Table 2.1, p. 2-1 (solar 953 MW incl. 815 MW rooftop; wind 103.5 CEB + 163 IPP); must-take = mini hydro 419 + biomass/other 54 (Table 2.3, p. 2-7)",
+    "additions_2024_mw": {"solar": 200, "wind": 0, "must_take": 0},
+    "additions_2024_source": "assumption: the LTGEP plan starts in 2025; 2024 solar additions set to the plan's 2025 rate (150 MW embedded + 50 MW grid). Multipliers move by < 0.15 for 0-400 MW",
+    "additions_mw": {
+      "solar":     {"2025": 200, "2026": 370, "2027": 400, "2028": 450, "2029": 450, "2030": 450},
+      "wind":      {"2025": 10,  "2026": 90,  "2027": 260, "2028": 200, "2029": 150, "2030": 150},
+      "must_take": {"2025": 20,  "2026": 25,  "2027": 30,  "2028": 40,  "2029": 40,  "2030": 40}
+    },
+    "additions_source": "LTGEP Table E3, p. E-7: solar = distribution-connected embedded + grid-connected; must-take = mini hydro + biomass",
+    "net_generation_2024_gwh": 16802,
+    "net_generation_2024_source": "CEB Statistical Digest 2024, p. 1",
+    "net_generation_forecast_gwh": {"2025": 17725, "2026": 18650, "2027": 19630, "2028": 20662, "2029": 21750, "2030": 22927},
+    "net_generation_source": "LTGEP Table 3.3 Base Demand Forecast, p. 3-11",
+    "not_modelled": "planned battery storage (LTGEP Table E3: 105 MW by 2026, 405 MW by 2029) and new gas plants' minimum loading; risk is before storage"
+  },
+
   "central": {
     "nlmin_mw": 520,
     "nlmin_source": "derived (scripts/derive_nlmin.py): 2 coal units x 150 MW minimum (LTGEP Table 2.7) + 217 MW major hydro kept online (observed 2024 practice); pending CEB review",
     "snsp_max": 0.75,
     "snsp_source": "CEB LTGEP 2025-2044 planning limit, pp. 7-7, 7-13, 10-14; 2024 operation never exceeded 46%",
-    "solar_multiplier": 1.5,
-    "solar_multiplier_source": "provisional: illustrative growth over 2024 installed solar",
-    "wind_multiplier": 1.0,
+    "scenario_year": 2028,
+    "scenario_year_source": "LTGEP base case; multipliers derived by build_grid_scenario.ltgep_scenario",
     "sessions_per_day": 10000,
     "sessions_per_day_source": "provisional: national public sessions/day; replace with Component 1 fleet scenario",
     "sessions_per_station_per_day": 8,
@@ -65,13 +83,14 @@
 
   "evaluation": {
     "day_sample": "one schedulable day per ISO week; week k prefers weekday k mod 7 so weekends are represented",
+    "risk_days": "every schedulable day with curtailment risk in the central scenario year (absorption comparison and weight trade-off)",
     "sweep_days": "the same days as the central comparison"
   },
 
   "sweeps": {
     "nlmin_mw": [240, 380, 520, 650, 780],
     "snsp_max": [null, 0.5, 0.65, 0.75],
-    "solar_multiplier": [1.0, 1.5, 2.0],
+    "scenario_year": [2026, 2027, 2028, 2030],
     "declared_departure_fraction": [0.5, 0.8, 1.0],
     "peak_weight": [0.0, 0.25, 1.0, 4.0, 16.0],
     "delay_weight": [0.0, 0.01, 0.1]

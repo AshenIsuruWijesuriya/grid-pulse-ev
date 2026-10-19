@@ -19,8 +19,8 @@ Method (see docs/methods_and_literature.md for the literature basis)
 
 3. Scenario residual load for the dispatchable synchronous fleet
    (coal, oil, major hydro):
-       NL_s(t) = D_sys - m_solar * S - m_wind * W - MT
-   With both multipliers at 1 this equals observed dispatchable generation
+       NL_s(t) = k_D * D_sys - m_solar * S - m_wind * W - k_MT * MT
+   With all multipliers at 1 this equals observed dispatchable generation
    hour by hour, so the 2024 baseline is observed, not modelled.
    Mini hydro and biomass are must-take (run-of-river / must-run), not
    dispatchable.
@@ -31,6 +31,13 @@ Method (see docs/methods_and_literature.md for the literature basis)
        snsp(t)  = max(0, m_solar*S + m_wind*W - snsp_max * D_sys)
        C(t)     = max(floor, snsp)
    C(t) is an inferred scenario proxy, NOT measured curtailment.
+
+5. Scenario years. The multipliers for a year Y come from the CEB Long Term
+   Generation Expansion Plan 2025-2044 base case (ltgep_scenario): installed
+   capacity at the end of 2023, planned additions per year (Table E3) and
+   the net-generation forecast (Table 3.3). Each source keeps its 2024
+   hourly shape and is scaled by mid-year capacity (or energy) relative to
+   2024, the usual way to project a reference-year profile.
 
 A day is eligible for scheduling only when all 24 hours are complete and
 unflagged and it is not a system-event day. Nothing is imputed.
@@ -190,16 +197,54 @@ def eligible_days(base: pd.DataFrame) -> list[pd.Timestamp]:
 # Scenario signal
 # --------------------------------------------------------------------------- #
 
+def ltgep_scenario(sy: dict, year: int) -> dict:
+    """Multipliers on the 2024 hourly profiles for LTGEP base-case year `year`.
+
+    Capacity sources use mid-year installed capacity relative to mid-2024:
+        C_mid(Y) = C_2023 + A_2024 + sum(A_2025..A_Y-1) + A_Y / 2
+        m(Y)     = C_mid(Y) / (C_2023 + A_2024 / 2)
+    Demand uses the net-generation forecast relative to CEB 2024 actual.
+    """
+    out = {"scenario_year": int(year)}
+    if year == 2024:
+        return {**out, "solar_multiplier": 1.0, "wind_multiplier": 1.0,
+                "demand_multiplier": 1.0, "must_take_multiplier": 1.0}
+    for src in ("solar", "wind", "must_take"):
+        c0, a24 = sy["installed_end_2023_mw"][src], sy["additions_2024_mw"][src]
+        adds = {int(k): v for k, v in sy["additions_mw"][src].items()}
+        if year not in adds:
+            raise ValueError(f"no LTGEP additions for {src} in {year}")
+        mid = c0 + a24 + sum(v for y, v in adds.items() if y < year) + adds[year] / 2
+        out[f"{src}_multiplier"] = round(mid / (c0 + a24 / 2), 4)
+        out[f"{src}_mid_year_mw"] = round(mid, 1)
+    out["demand_multiplier"] = round(sy["net_generation_forecast_gwh"][str(year)]
+                                     / sy["net_generation_2024_gwh"], 4)
+    return out
+
+
+def scenario_kwargs(cfg: dict, year: int | None = None, **override) -> dict:
+    """scenario_signal keyword arguments for the central case (optionally another year)."""
+    c = cfg["central"]
+    m = ltgep_scenario(cfg["scenario_years"], c["scenario_year"] if year is None else year)
+    kw = {"nlmin_mw": c["nlmin_mw"], "snsp_max": c["snsp_max"],
+          "peak_band_fraction": cfg["grid"]["peak_band_fraction"],
+          **{k: m[k] for k in ("solar_multiplier", "wind_multiplier", "demand_multiplier",
+                               "must_take_multiplier")}}
+    kw.update(override)
+    return kw
+
+
 def scenario_signal(base: pd.DataFrame, nlmin_mw: float, solar_multiplier: float = 1.0,
                     wind_multiplier: float = 1.0, snsp_max: float | None = None,
-                    peak_band_fraction: float = 0.03) -> pd.DataFrame:
+                    peak_band_fraction: float = 0.03, demand_multiplier: float = 1.0,
+                    must_take_multiplier: float = 1.0) -> pd.DataFrame:
     """NL_s(t), C(t) and peak-stress windows for one scenario (MW, hourly)."""
     s = pd.DataFrame(index=base.index)
-    s["demand_system_mw"] = base["demand_system_mw"]
+    s["demand_system_mw"] = demand_multiplier * base["demand_system_mw"]
     s["solar_mw"] = solar_multiplier * base["solar_available_mw"]
     s["wind_mw"] = wind_multiplier * base["wind_mw"]
     s["vre_mw"] = s["solar_mw"] + s["wind_mw"]
-    s["must_take_mw"] = base["must_take_mw"]
+    s["must_take_mw"] = must_take_multiplier * base["must_take_mw"]
     s["net_load_mw"] = s["demand_system_mw"] - s["vre_mw"] - s["must_take_mw"]
     s["nlmin_mw"] = float(nlmin_mw)
     s["snsp_max"] = np.nan if snsp_max is None else float(snsp_max)
@@ -232,9 +277,8 @@ def diagnostics(base: pd.DataFrame, sites: dict, ceb: pd.DataFrame, cfg: dict) -
         pd.concat(sites, axis=1).mean(axis=1)[complete], c["solar_metered_mw"])[0, 1]), 3)
 
     central = cfg["central"]
-    base_sig = scenario_signal(base, central["nlmin_mw"], 1.0, 1.0, central["snsp_max"])
-    cen_sig = scenario_signal(base, central["nlmin_mw"], central["solar_multiplier"],
-                              central["wind_multiplier"], central["snsp_max"])
+    base_sig = scenario_signal(base, **scenario_kwargs(cfg, 2024))
+    cen_sig = scenario_signal(base, **scenario_kwargs(cfg))
     days = eligible_days(base)
 
     def signal_profile(sig: pd.DataFrame) -> dict:
@@ -284,10 +328,29 @@ def diagnostics(base: pd.DataFrame, sites: dict, ceb: pd.DataFrame, cfg: dict) -
             **signal_profile(base_sig),
         },
         "central_scenario_signal": {
-            "solar_multiplier": central["solar_multiplier"],
+            **ltgep_scenario(cfg["scenario_years"], central["scenario_year"]),
             **signal_profile(cen_sig),
         },
+        "scenario_years": scenario_year_table(base, cfg),
     }
+
+
+def scenario_year_table(base: pd.DataFrame, cfg: dict) -> list[dict]:
+    """Risk under each LTGEP base-case year (2024 weather and shapes, central NLmin/SNSP)."""
+    complete = base["hour_status"] == "complete"
+    years = [2024] + sorted(int(y) for y in cfg["scenario_years"]["net_generation_forecast_gwh"])
+    rows = []
+    for y in years:
+        s = scenario_signal(base, **scenario_kwargs(cfg, y))[complete]
+        risk = s["curtailment_risk_mw"]
+        rows.append({**ltgep_scenario(cfg["scenario_years"], y),
+                     "risk_hours": int((risk > 0).sum()),
+                     "risk_energy_gwh": round(float(risk.sum() / 1000), 1),
+                     "days_with_risk": int((risk.groupby(s.index.normalize()).sum() > 0).sum()),
+                     "snsp_binding_hours": int((s["c_snsp_mw"] > s["c_floor_mw"]).sum()),
+                     "security_shortfall_hours": int((s["security_shortfall_mw"] > 0).sum()),
+                     "risk_share_of_available_vre": round(float(risk.sum() / s["vre_mw"].sum()), 4)})
+    return rows
 
 
 def main() -> None:
@@ -318,8 +381,8 @@ def main() -> None:
         json.dumps(info, indent=2), encoding="utf-8")
     print(json.dumps(info, indent=2))
     print(f"Wrote grid_base_{year}_hourly.csv to {args.outdir}")
-    print("REMINDER: C(t) is an inferred scenario proxy. NLmin, SNSP and solar "
-          "growth are provisional until Appendix C is completed and approved.")
+    print("REMINDER: C(t) is an inferred scenario proxy. NLmin is derived (pending CEB "
+          "review); scenario years follow the LTGEP base case, before any new storage.")
 
 
 if __name__ == "__main__":
