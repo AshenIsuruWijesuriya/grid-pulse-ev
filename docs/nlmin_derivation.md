@@ -1,9 +1,13 @@
 # Appendix C — Derivation worksheet for the minimum secure net-demand level (NLmin)
 
 **Project:** J26-DS-331 · Component 3 · Wijesuriya W A A I (IT23274648)
-**Status:** structure and empirical cross-check only. Every CEB parameter below
-is **blank until a cited source supplies it**. No value in §3–§5 may be filled
-from memory, a plausible guess, or an uncited web page.
+**Status (2026-10-19):** derived. Every plant and policy value in §3–§5 is
+cited to the CEB *Long Term Generation Expansion Plan 2025–2044* (LTGEP,
+358 pp.); the operating-practice values come from the 2024 record. Central
+**NLmin = 520 MW** (517 MW before rounding), sweep 240–780 MW. It is still
+**pending review by a CEB System Control engineer** (proposal §3.5).
+Reproduce with `scripts/derive_nlmin.py` →
+`results/grid_scenario/nlmin_derivation.json`.
 
 ## 1. Purpose
 
@@ -27,41 +31,45 @@ arithmetic is meant to be checked by a CEB System Control Center engineer
 
 ## 3. Minimum stable generation of the must-run fleet
 
-| Plant / unit | Units | Rated (MW, gross) | Net (MW) | Min. stable load (MW or %) | Must-run? Why | Source (doc, page, date) |
-|---|---|---|---|---|---|---|
-| Lakvijaya (coal) | | | | | | |
-| Major hydro: minimum release (irrigation / environmental) | | | | | | |
-| Oil (CEB / IPP), if any unit must stay synchronised | | | | | | |
-| **Subtotal** | | | | | | |
+| Plant / unit | Units | Net (MW) | Minimum operating level | Must-run? Why | Source |
+|---|---|---|---|---|---|
+| Lakvijaya (coal) | 3 | 270 each (used for studies) | **150 MW per unit** (56% of net) | Yes: slow start; 2 units online in 81% of the stressed hours (§6) | LTGEP Table 2.7, p. 2-10 |
+| Major hydro | many | — | no technical minimum stated | Operating practice: 217 MW (p10) kept online in stressed hours for regulation | observed 2024 (§6) |
+| Oil (CEB / IPP) | — | — | — | No: below 5 MW in 77% of stressed hours | observed 2024 |
+| Mini hydro, biomass | 212 + 14 projects | 419 + 54 | — | Not dispatchable: "typically non-dispatchable run-of-river" | LTGEP p. 2-3; Table 2.3, p. 2-7 |
 
-The proposal (§1.1.1) states that thermal units "cannot run stably below
-roughly 40 to 50 percent of rated output". **That sentence needs a citation**
-before it is relied on here.
+The record agrees with the cited coal minimum: the empirical per-unit lower
+quantile is 154–156 MW net (§7). The proposal's sentence that thermal units
+"cannot run stably below roughly 40 to 50 percent of rated output" is
+replaced by this cited 150/270 MW (56%).
 
 ## 4. Spinning reserve
 
 | Item | Value | Source |
 |---|---|---|
-| Largest credible single contingency (unit, MW) | | |
-| CEB operating reserve policy, if published | | |
-| Share held on synchronised units (vs fast-start) | | |
+| Spinning reserve | 5% of demand | LTGEP planning assumption (l), p. 7-13 |
+| Largest single unit | ≤ 25% of demand | LTGEP planning assumption (n), p. 7-13 |
+| Largest credible contingency | one Lakvijaya unit, 270 MW | LTGEP Table 2.7 |
 
-Jayasinghe et al. (2018) [3] treat regulating reserve; record here whether
-their figure is reserve held *above* MSG (adds to NLmin) or within it.
+Reserve is **upward headroom**, so it does not add to NLmin; it limits how
+few units may be online. At the central point (2 coal units at 150 MW) the
+headroom is 2 × (270 − 150) = 240 MW. The largest reserve requirement in the
+stressed hours is 89.8 MW, so the requirement is met in 100% of them, and
+270 MW ≤ 25% of demand in 100% of them.
 
 ## 5. Inertia / synchronous-machine requirement
 
 | Item | Value | Source |
 |---|---|---|
-| Minimum number of synchronised units, or minimum system inertia (MWs) | | |
-| Equivalent MW of synchronous generation | | |
-| Overlap with §3 (do not double-count units already must-run) | | |
+| SNSP planning limit | **75%** non-synchronous share of demand | LTGEP pp. 7-7, 7-13, 10-14 |
+| Observed 2024 maximum VRE share of demand | 46.3% | `derive_nlmin.py` |
+| Overlap with §3 | none: inertia is not converted to MW | — |
 
-Island operators often state this requirement as a **system non-synchronous
-penetration (SNSP) limit** or a **minimum number of synchronous units**, not
-in MW (EirGrid operational constraints). The code supports an SNSP limit
-(`snsp_max`); ask CEB System Control which form, and which value, it uses.
-CEB's April 2025 statements describe inertia support as a percentage.
+CEB states the inertia requirement as an **SNSP limit**, the same form EirGrid
+uses, not as MW. It therefore enters C(t) as its own term,
+VRE − 0.75 · D_sys, and is **not** added to NLmin, which would double-count
+the same running units. At 75% the SNSP term first binds in scenario year
+2029 (1 hour) and binds for 33 hours in 2030; before that the floor binds.
 
 ## 6. Constrained derivation (not a sum of independent MW addends)
 
@@ -87,7 +95,28 @@ balance and plant/system-security restrictions. Illustrative constraints:
 Define `NLmin` only after specifying which generation categories meet the
 residual demand and which generators are truly must-run. Record the scenario,
 assumptions, source citations, solver output, feasible/infeasible status and
-sensitivity bounds. **No numeric NLmin has been validated yet.**
+sensitivity bounds.
+
+**Implemented derivation (`scripts/derive_nlmin.py`).** Full unit data (H, S,
+ramp rates) is not public, so the derivation fixes the commitment the system
+actually used in its most stressed hours and applies the cited minima:
+
+    NLmin = n_coal × 150 MW + H_min
+
+- *Stressed hours:* the lowest 2% of observed hourly dispatchable output
+  (coal + oil + major hydro) over complete 2024 hours: 167 hours, all at or
+  below 853.9 MW.
+- *n_coal:* fewest units consistent with observed coal output,
+  ⌈coal / 270⌉. The distribution is 1 unit: 4 hours, 2 units: 136, 3 units: 27,
+  so the mode is 2.
+- *H_min:* major hydro kept online: minimum 90.5 MW, p10 217.0 MW, median
+  329.0 MW.
+
+| Scenario | Coal units × 150 MW | Major hydro | NLmin |
+|---|---:|---|---:|
+| Low | 1 × 150 | minimum (90.5) | 240.5 MW |
+| **Central** | **2 × 150** | **p10 (217.0)** | **517.0 MW → 520 MW** |
+| High | 3 × 150 | median (329.0) | 779.0 MW |
 
 ## 7. Empirical cross-check against the record
 
@@ -129,11 +158,19 @@ dispatch** (166 intervals, pooled, after quality filtering):
   utility-scale solar.
 
 **Hourly cross-check (boundary-corrected NL, 2026-10-19):** the minimum
-hourly observed dispatchable generation in 2024 was 575.5 MW (p01 775 MW). At
-a provisional NLmin of 700 MW, observed operation fell below the floor in 32
-hours (86% of them 10:00–15:00, mostly weekends). Either the secure floor in
-2024 was at or below about 575 MW, or those hours were operated below a
-nominal floor. Use this bound when choosing the §8 sweep range.
+hourly observed dispatchable generation in 2024 was 575.5 MW (p01 775 MW). The
+earlier placeholder of 700 MW was crossed by observed operation in 32 hours,
+so it was too high for 2024. The derived central 520 MW is crossed in **0
+hours**: the system really ran above it all year, with a 55 MW margin at the
+minimum hour. This is the consistency check SO2 asks for.
+
+**2025 caveat:** CEB curtailed rooftop and utility solar on several 2025
+holidays and weekends, and ran more conservatively after the 9 February 2025
+blackout. With the 2025 LTGEP scenario and NLmin 520 MW the model shows **no**
+risk in 2025. Either operators used a floor nearer the high scenario (780 MW)
+in 2025, or 2025 solar grew faster than the plan. The PUCSL April–December
+2025 workbooks would test this; until then the 650 and 780 MW sweep points
+carry the post-blackout case.
 
 **Reading:** the observed low net-dispatch proxy provides a consistency check,
 not a verified physical boundary. If a proposed secure constraint conflicts
@@ -144,8 +181,11 @@ curtailment did not occur.
 
 ## 8. Sweep range
 
-To be set from §6 low/high bounds and justified here. Every headline result is
-reported across this range, never at a single value.
+Sweep **[240, 380, 520, 650, 780] MW**: the §6 low, central and high points
+plus the two midpoints, rounded to 10 MW (`derive_nlmin.py` writes it). Every
+headline result is reported across this range, never at a single value. The
+SNSP sweep is [off, 0.50, 0.65, 0.75]; 0.50 is about where the 9 February 2025
+blackout occurred.
 
 ## 9. Draft wording for C(t) (supervisor approval pending)
 

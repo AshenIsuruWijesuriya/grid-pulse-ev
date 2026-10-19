@@ -3,7 +3,7 @@
 **Project:** J26-DS-331  
 **Approved individual topic:** Optimizing Public EV Charging Schedules for Renewable-Curtailment Absorption and Peak Reduction in Sri Lanka
 
-The full SO1–SO6 pipeline is implemented with **provisional parameters** (see `config/scenarios.json` and `docs/methods_and_literature.md`). The grid data are PUCSL 15-minute dispatch reports reconciled to CEB published totals. Raw data are not committed. The example grid data under `tests/fixtures/` is **synthetic** and is strictly for testing.
+The full SO1–SO6 pipeline is implemented. NLmin, the SNSP limit and the scenario years are cited to the CEB *Long Term Generation Expansion Plan 2025–2044*; fleet volume and session behaviour are still **provisional** (see `config/scenarios.json` and `docs/methods_and_literature.md`). The grid data are PUCSL 15-minute dispatch reports reconciled to CEB published totals. Raw data are not committed. The example grid data under `tests/fixtures/` is **synthetic** and is strictly for testing.
 
 ## Research roadmap mapped to the approved proposal
 
@@ -31,7 +31,7 @@ py -3 -m venv .venv
 
 If `py -3` is not found, try `python -m venv .venv`. You **do not have to activate** the virtual environment, because the commands above invoke its Python directly.
 
-Expected test result: `135 passed` (the exact run time can vary).
+Expected test result: `143 passed` (the exact run time can vary).
 
 ## Optional: download a pilot NASA POWER solar/weather dataset
 
@@ -55,14 +55,18 @@ Run from the project root once the PUCSL 2024 data are preprocessed and the NASA
 ```powershell
 .\.venv\Scripts\python.exe scripts\build_hourly_net_demand.py --input data\processed\grid\pucsl_2024_consolidated_dispatch_15min.csv --year 2024
 .\.venv\Scripts\python.exe scripts\build_grid_scenario.py
-.\.venv\Scripts\python.exe scripts\run_experiments.py --quick     # smoke test, ~8 min
-.\.venv\Scripts\python.exe scripts\run_experiments.py             # full run, ~50 min
+.\.venv\Scripts\python.exe scripts\derive_nlmin.py
+.\.venv\Scripts\python.exe scripts\forecast_grid.py
+.\.venv\Scripts\python.exe scripts\run_experiments.py --quick --workers 4   # smoke test
+.\.venv\Scripts\python.exe scripts\run_experiments.py --workers 6           # full run
 ```
 
-- `build_grid_scenario.py`: boundary-corrected demand, modelled available solar, and the inferred curtailment-risk signal C(t) (SO1/SO2).
+- `build_grid_scenario.py`: boundary-corrected demand, modelled available solar, the inferred curtailment-risk signal C(t), and the LTGEP scenario years 2025–2030 (SO1/SO2).
+- `derive_nlmin.py`: NLmin from the cited coal minimum and the commitment observed in the 2024 stressed hours, with reserve and single-unit checks (SO2, Appendix C).
+- `forecast_grid.py`: day-ahead demand, solar, wind and must-take forecasts, kept only where they beat persistence.
 - `ev_sessions.py`: session sets, parametric now and a GMM fitted to ACN-Data with `--acn-json` (SO3).
 - `schedule_ev_charging.py`: uncontrolled, solar-following and curtailment-aware strategies, plus the constraint audit (SO4).
-- `run_experiments.py`: comparison, weight trade-off, sensitivity and persistence forecast (SO5/SO6). Outputs go to `results/experiments/`.
+- `run_experiments.py`: comparison on a weekly sample and on every risk day, weight trade-off, sensitivity, and forecast-based planning (SO5/SO6). `--workers` solves days in parallel. Outputs go to `results/experiments/`.
 
 Every assumed parameter is in `config/scenarios.json`. Values tagged `provisional` must be replaced or approved before results are reported.
 
