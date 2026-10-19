@@ -16,11 +16,26 @@
     "evening_hours": [17, 23]
   },
 
+  "nlmin_derivation": {
+    "coal_unit_net_mw": 270,
+    "coal_unit_min_mw": 150,
+    "coal_units_installed": 3,
+    "coal_source": "CEB LTGEP 2025-2044, Table 2.7, p. 2-10 (Lakvijaya: 3 x 270 MW used for studies; minimum operating level 150 MW)",
+    "spinning_reserve_share_of_demand": 0.05,
+    "reserve_source": "CEB LTGEP 2025-2044, planning assumption (l), p. 7-13",
+    "max_single_unit_share_of_demand": 0.25,
+    "single_unit_source": "CEB LTGEP 2025-2044, planning assumption (n), p. 7-13",
+    "snsp_planning_limit": 0.75,
+    "snsp_source": "CEB LTGEP 2025-2044, pp. 7-7, 7-13, 10-14",
+    "mini_hydro_source": "CEB LTGEP 2025-2044, p. 2-3: mini hydro plants are typically non-dispatchable run-of-river",
+    "stress_quantile": 0.02
+  },
+
   "central": {
-    "nlmin_mw": 700,
-    "nlmin_source": "provisional: inside the observed 2024 dispatchable range (min 565 MW, p01 774 MW); replace with Appendix C derivation",
-    "snsp_max": null,
-    "snsp_source": "provisional: disabled until CEB confirms its inertia metric",
+    "nlmin_mw": 520,
+    "nlmin_source": "derived (scripts/derive_nlmin.py): 2 coal units x 150 MW minimum (LTGEP Table 2.7) + 217 MW major hydro kept online (observed 2024 practice); pending CEB review",
+    "snsp_max": 0.75,
+    "snsp_source": "CEB LTGEP 2025-2044 planning limit, pp. 7-7, 7-13, 10-14; 2024 operation never exceeded 46%",
     "solar_multiplier": 1.5,
     "solar_multiplier_source": "provisional: illustrative growth over 2024 installed solar",
     "wind_multiplier": 1.0,
@@ -54,8 +69,8 @@
   },
 
   "sweeps": {
-    "nlmin_mw": [500, 600, 700, 800, 900],
-    "snsp_max": [null, 0.5, 0.65],
+    "nlmin_mw": [240, 380, 520, 650, 780],
+    "snsp_max": [null, 0.5, 0.65, 0.75],
     "solar_multiplier": [1.0, 1.5, 2.0],
     "declared_departure_fraction": [0.5, 0.8, 1.0],
     "peak_weight": [0.0, 0.25, 1.0, 4.0, 16.0],
