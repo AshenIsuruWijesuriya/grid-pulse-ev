@@ -289,3 +289,34 @@ No adjustment or imputation has been applied.
 Next:
 Document reporting-boundary uncertainties, seek CEB/PUCSL
 clarification, and begin EV charging-session modeling.
+
+## 2026-10-19 — Synthetic EV Charging Baseline Implementation
+
+**Activity:** Implemented and validated a reproducible
+synthetic EV charging-session generator and uncontrolled
+charging baseline.
+
+**Implementation:**
+- Developed scripts/ev_charging_baseline.py.
+- Created an EV baseline analysis Jupyter notebook.
+- Generated 140 synthetic sessions for April 1–7, 2024.
+- Used 15-minute charging intervals and random seed 42.
+- Modeled immediate charging at each session's maximum power.
+
+**Results:**
+- Total requested energy: 2,561.87 kWh.
+- Total delivered energy: 2,400.09 kWh.
+- Total unmet energy: 161.78 kWh.
+- Fully served sessions: 121 of 140 (86.43%).
+- Peak incremental charging load: 65.2 kW.
+- Maximum concurrently connected vehicles: 12.
+- Automated tests: 103 passed, without warnings.
+
+**Limitations:**
+- Sessions are synthetic and not calibrated to Sri Lankan data.
+- No charger-port or site-level power-capacity constraints.
+- No grid-aware optimization has been implemented.
+- Results cannot establish real-world national EV charging behavior.
+
+**Next:** Implement charger availability and site-capacity
+constraints, followed by a constrained scheduling optimizer.
