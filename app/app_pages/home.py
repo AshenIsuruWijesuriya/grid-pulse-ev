@@ -54,6 +54,8 @@ else:
 st.subheader("Try it", icon=":material/play_circle:")
 with st.container(horizontal=True):
     st.page_link("app_pages/plan_a_day.py", label="Plan a real day", icon=":material/calendar_month:")
+    st.page_link("app_pages/my_charge.py", label="Plan your own charge", icon=":material/edit_calendar:")
     st.page_link("app_pages/drivers.py", label="Follow a driver", icon=":material/directions_car:")
+    st.page_link("app_pages/station.py", label="Look inside a station", icon=":material/electrical_services:")
     st.page_link("app_pages/evidence.py", label="See the evidence", icon=":material/fact_check:")
     st.page_link("app_pages/how_it_works.py", label="How it works", icon=":material/menu_book:")

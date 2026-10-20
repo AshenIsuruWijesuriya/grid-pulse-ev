@@ -66,15 +66,15 @@ with st.container(border=True):
                     f"({unc['clean_share'] * 100:.0f}% if you charge on arrival, "
                     f"{sunny['clean_share'] * 100:.0f}% if you charge when sunny).")
     else:
-        st.markdown(":material/solar_power: No clean power is wasted while you are plugged in on this day, so "
-                    "smart charging is about the evening peak instead.")
+        st.markdown(":material/solar_power: No clean power is wasted while you are plugged in on this day.")
     if max(smart["peak_kwh"], unc["peak_kwh"]) < 0.05:
         st.markdown(f":material/trending_down: Your car is not charging during the grid's busiest hours "
                     f"({peak_label}) with either option, so it adds nothing to the evening peak.")
     else:
         st.markdown(f":material/trending_down: You add **{smart['peak_kwh']:.1f} kWh** to the grid's busiest "
                     f"hours ({peak_label}), against {unc['peak_kwh']:.1f} kWh charging on arrival.")
-    st.markdown(f":material/check_circle: You leave with **all {smart['delivered_kwh']:.1f} kWh** you asked for.")
+    st.markdown(f":material/check_circle: You leave with **all {smart['delivered_kwh']:.1f} kWh** "
+                + ("your charger can deliver in that time." if mc["capped"] else "you asked for."))
 
 with st.container(horizontal=True):
     st.metric("Full by (smart charging)", smart["finish"].strftime("%H:%M"),

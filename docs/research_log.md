@@ -524,3 +524,60 @@ the method.
 
 **Next:** Usability check with a planner (NFR5, WBS 5.12). Record a fallback
 screen capture before the presentation.
+\n
+## 2026-10-21 — Prototype extended: own trip, station view, exports (FR7, FR12)
+
+**Activity:** Added two pages and data export to the prototype.
+
+**What was added:**
+- *Plan my charge* (`dashboard_data.my_charge`). A visitor enters a trip:
+  - plug-in time and leaving time (leaving earlier means the next morning,
+    latest 09:00);
+  - energy needed;
+  - charger.
+
+  The car joins the least busy station that day, declares its departure, and
+  is planned together with the day's other cars. The request is capped at what
+  the charger can deliver, with a warning when it is. The page reports:
+  - when the car is full;
+  - the share of its energy charged while clean power would be wasted;
+  - the energy charged in the grid's peak window;
+  - that it leaves with its full energy.
+
+  Example, 3 Nov 2028 scenario, 08:00–17:00, 20 kWh, 7.2 kW: smart charging
+  gives 100% from wasted power (64% charging on arrival), full by 12:00.
+- *Station view* (`dashboard_data.station_view`): one station's cars, its
+  total power under each option against the 50 kW connection limit, and a
+  timeline of each car under smart charging. The busiest station on 3 Nov
+  (18 cars) reaches the limit and never exceeds it.
+- *Downloads* on Plan a day:
+  - day summary (JSON);
+  - hourly grid and EV load;
+  - every car's outcome;
+  - the 15-minute smart-charging schedule.
+
+  The large files are generated only when clicked. The format is proposed in
+  `docs/export_schema.md` for group agreement (FR12). It also includes a
+  proposed fleet-scenario input file for Component 1.
+- `dashboard_data.day_detail` keeps every car's 15-minute schedule. The driver
+  view, station view and exports share one cached solve.
+
+**Correction during the work:** "evening peak" for a single car was first
+measured as energy charged from 17:00 to midnight. That was misleading, because
+the optimiser keeps down only the peak hours, and charging at 22:00 does not
+raise the peak. It now uses the grid's own peak window: the hours within 3% of
+the day's maximum net load (18:00–20:00 on 3 Nov).
+
+**Validation:**
+- New data-layer tests:
+  - visitor trip rules (quarter hours, 09:00 limit, capping, least busy
+    station);
+  - the visitor leaves with exactly the energy requested and never charges
+    while unplugged;
+  - the station never exceeds its connection limit;
+  - each export has the documented columns;
+  - the schedule energy per car sums to its request.
+- Every page runs headless.
+- Overnight, invalid and capped trips were checked on the page.
+- Charts were rendered and inspected.
+- Tests: 166 passed.

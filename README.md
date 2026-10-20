@@ -31,7 +31,7 @@ py -3 -m venv .venv
 
 If `py -3` is not found, try `python -m venv .venv`. You **do not have to activate** the virtual environment, because the commands above invoke its Python directly.
 
-Expected test result: `159 passed` (the exact run time can vary).
+Expected test result: `166 passed` (the exact run time can vary).
 
 ## Optional: download a pilot NASA POWER solar/weather dataset
 
@@ -86,7 +86,10 @@ Opens at http://localhost:8501 (this computer only; see `.streamlit/config.toml`
   - a side-by-side table.
 
   Expert settings (NLmin, SNSP, declared share, weights) are in a collapsed section.
+  You can also download the day's summary (JSON), the hourly grid and EV load, every car's outcome, and the 15-minute smart-charging schedule (CSV). The format is in `docs/export_schema.md` (proposal for FR12).
+- **Plan my charge:** enter your own trip (plug-in and leaving times, energy, charger). Your car is added to the day's other cars and everyone is planned together. It shows when you are full, how much of your energy is clean power that would otherwise be wasted, and how much you add to the grid's busiest hours.
 - **A driver's view:** a typical driver from three groups (morning commuter, midday shopper, evening visitor). It shows when their car charges under each option, and that it leaves full.
+- **Station view** (for operators): one station's cars over the day, its total power under each option, and its 50 kW connection limit, which is never exceeded.
 - **Evidence:** the saved SO5/SO6 results in plain words, with all tables in a collapsed section.
 - **How it works:** the method in four steps, what is real, modelled or assumed, every parameter with its source, a glossary and the limits.
 

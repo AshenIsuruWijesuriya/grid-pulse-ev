@@ -46,5 +46,5 @@ def test_plan_a_day_writes_a_verdict_and_metrics(app):
 def test_plan_my_charge_reports_a_full_battery(app):
     app.switch_page("app_pages/my_charge.py").run()
     text = " ".join(m.value for m in app.markdown)
-    assert "You leave with **all 20.0 kWh**" in text
+    assert "You leave with **all 20.0 kWh** you asked for." in text
     assert app.metric[0].label == "Full by (smart charging)"
