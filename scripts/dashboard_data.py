@@ -231,9 +231,10 @@ def day_detail(day: pd.Timestamp, base: pd.DataFrame, cfg: dict, settings: Setti
     prob = sch.day_problem(day, sessions, c["station_capacity_kw"])
     grid_hours = sig.reindex(prob.hours)
     risk_slot = (grid_hours["curtailment_risk_mw"].fillna(0.0).to_numpy() > 0)[prob.slot_hour]
-    ev0, ev1 = run_cfg["grid"]["evening_hours"]
-    evening_slot = np.asarray((prob.slots.hour >= ev0) & (prob.slots.hour <= ev1)
-                              & (prob.slots.normalize() == day))
+    # The day's own peak window (net load within peak_band_fraction of its maximum),
+    # not "the evening": charging at 22:00 does not raise the peak.
+    peak_hour = grid_hours["is_peak_window"].fillna(False).astype(bool).to_numpy()
+    peak_slot = peak_hour[prob.slot_hour] & np.asarray(prob.slots.normalize() == day)
     P, status = {}, {}
     for s in DETAIL_STRATEGIES:
         grid = sch.plan_grid(sig, prob.hours) if s != "uncontrolled" else None
@@ -241,11 +242,11 @@ def day_detail(day: pd.Timestamp, base: pd.DataFrame, cfg: dict, settings: Setti
         status[s] = r["status"]
         if r["status"] not in ("optimal", "simulated"):
             return {"prob": prob, "P": {}, "status": status, "feasible": False, "settings": settings,
-                    "risk_slot": risk_slot, "evening_slot": evening_slot, "grid": grid_hours,
+                    "risk_slot": risk_slot, "peak_slot": peak_slot, "grid": grid_hours,
                     "experiment_sessions": in_pool}
         P[s] = r["P"]
     return {"prob": prob, "P": P, "status": status, "feasible": True, "settings": settings,
-            "risk_slot": risk_slot, "evening_slot": evening_slot, "grid": grid_hours,
+            "risk_slot": risk_slot, "peak_slot": peak_slot, "grid": grid_hours,
             "experiment_sessions": in_pool}
 
 
@@ -351,7 +352,7 @@ def my_charge(day: pd.Timestamp, base: pd.DataFrame, cfg: dict, settings: Settin
         per[s] = {"finish": fin, "delivered_kwh": total,
                   "clean_kwh": float(kwh[d["risk_slot"]].sum()),
                   "clean_share": float(kwh[d["risk_slot"]].sum() / total) if total else 0.0,
-                  "evening_kwh": float(kwh[d["evening_slot"]].sum()),
+                  "peak_kwh": float(kwh[d["peak_slot"]].sum()),
                   "extra_wait_min": max(0.0, (fin.value - earliest.value) / 60e9)}
     out.update(arrival=prob.slots[prob.arr[i]],
                departure=prob.slots[0] + pd.offsets.Minute(15 * int(prob.dep[i])),
