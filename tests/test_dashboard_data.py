@@ -1,5 +1,7 @@
 """Tests for the dashboard data layer in scripts/dashboard_data.py."""
 
+import io
+import json
 import sys
 from pathlib import Path
 
@@ -102,6 +104,68 @@ def test_driver_examples_are_complete_and_inside_plug_in_window():
         p = e["power_kw"]
         outside = (p.index < e["arrival"]) | (p.index >= e["departure"])
         assert (p[outside].abs() < 1e-6).all().all()                     # never charges unplugged
+
+
+SETTINGS = dd.Settings(2024, 520.0, 0.75, 200, 0.8, {"curtailment": 1.0, "peak": 1.0, "delay": 0.01})
+DAY = pd.Timestamp("2024-03-04", tz=TZ)
+
+
+def test_visitor_session_rules():
+    sessions = pd.DataFrame({"station_id": [0, 0, 1, 2, 2, 2]})
+    v = dd.visitor_session(DAY, "08:00", "17:00", 25.0, 7.2, sessions, 2)
+    row = v["row"].iloc[0]
+    assert row["session_id"] == dd.VISITOR_ID and row["declares_departure"]
+    assert row["station_id"] == 1                                   # least busy station
+    assert row["departure_local"].value - row["arrival_local"].value == 9 * 3600 * 10**9
+    over = dd.visitor_session(DAY, "08:00", "09:00", 25.0, 7.2, sessions, 2)
+    assert over["capped"] and over["row"]["energy_request_kwh"].iloc[0] == pytest.approx(7.2)
+    night = dd.visitor_session(DAY, "20:00", "07:00", 10.0, 3.6, sessions, 2)
+    assert night["row"]["departure_local"].iloc[0] == DAY + pd.offsets.Day(1) + pd.offsets.Hour(7)
+    with pytest.raises(ValueError, match="quarter hour"):
+        dd.visitor_session(DAY, "08:10", "17:00", 10.0, 7.2, sessions, 2)
+    with pytest.raises(ValueError, match="09:00"):
+        dd.visitor_session(DAY, "20:00", "11:00", 10.0, 7.2, sessions, 2)
+
+
+def test_my_charge_delivers_in_full_and_prefers_wasted_power():
+    mc = dd.my_charge(DAY, _base(), _cfg(200), SETTINGS, None, "08:00", "17:00", 20.0, 7.2)
+    assert mc["feasible"] and mc["risk_in_window"]
+    for r in mc["per_strategy"].values():
+        assert r["delivered_kwh"] == pytest.approx(20.0, abs=1e-3)
+        assert mc["arrival"] < r["finish"] <= mc["departure"]
+    smart, unc = mc["per_strategy"]["curtailment_aware"], mc["per_strategy"]["uncontrolled"]
+    assert smart["clean_share"] > unc["clean_share"]          # moved into the wasted-power hours
+    p = mc["power_kw"]
+    outside = (p.index < mc["arrival"]) | (p.index >= mc["departure"])
+    assert (p[outside].abs() < 1e-6).all().all()
+
+
+def test_station_view_respects_the_connection_limit():
+    d = dd.day_detail(DAY, _base(), _cfg(200), SETTINGS)
+    assert d["feasible"]
+    sid = dd.station_ids(d)[0]
+    view = dd.station_view(d, sid)
+    assert len(view["cars"]) == int((d["prob"].station == sid).sum())
+    assert max(view["peak_kw"].values()) <= view["capacity_kw"] + 1e-6
+    assert list(view["smart_kw"].columns) == list(view["cars"]["Car"])
+
+
+def test_exports_have_the_documented_columns():
+    base, cfg = _base(), _cfg(200)
+    d = dd.day_detail(DAY, base, cfg, SETTINGS)
+    out = dd.solve_one_day(DAY, base, cfg, SETTINGS, strategies=dd.DETAIL_STRATEGIES)
+    hourly = pd.read_csv(io.StringIO(dd.export_hourly(out)))
+    assert hourly.columns[0] == "hour_start_local" and len(hourly) == 30
+    assert hourly["hour_start_local"].iloc[0] == "2024-03-04T00:00:00+05:30"
+    sessions = pd.read_csv(io.StringIO(dd.export_sessions(d)))
+    assert len(sessions) == 200 and {"delivered_kwh_curtailment_aware", "finish_local_uncontrolled"} <= set(sessions)
+    sched = pd.read_csv(io.StringIO(dd.export_schedule(d)))
+    assert list(sched.columns) == ["session_id", "station_id", "interval_start_local", "power_kw", "energy_kwh"]
+    total = sched.groupby("session_id")["energy_kwh"].sum()
+    req = sessions.set_index("session_id")["energy_request_kwh"]
+    assert np.allclose(total.reindex(req.index, fill_value=0).to_numpy(), req.to_numpy(), atol=1e-2)
+    summary = json.loads(dd.export_summary(DAY, SETTINGS, out, dd.verdict(DAY, out), cfg))
+    assert summary["schema"].endswith("/v1") and summary["settings"]["nlmin_mw"] == 520.0
 
 
 def test_long_loads_and_assumptions_are_tidy():

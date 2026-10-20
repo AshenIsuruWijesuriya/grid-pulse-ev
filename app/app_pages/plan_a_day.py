@@ -79,6 +79,35 @@ same = ("the same sessions as the saved full-year study" if out["experiment_sess
 st.caption(f"{out['sessions']:,} charging sessions ({same}). Every plan is re-checked by an independent "
            "audit: no charger over its limit, no car charged while unplugged, every promised kWh delivered.")
 
+with st.expander("Download the results", icon=":material/download:"):
+    st.caption("Plain CSV and JSON in the format described in docs/export_schema.md. Times are the start "
+               "of each interval, Sri Lanka time. The two larger files take a few seconds to prepare.")
+    base, _ = shared.inputs()
+    p = shared.pool(settings.sessions_per_day, settings.declared_departure_fraction)
+    tag = f"{day_iso}_{settings.scenario_year}"
+    held: dict = {}
+
+    def _detail():                       # one solve shared by both large files
+        if "d" not in held:
+            held["d"] = dd.day_detail(pd.Timestamp(day_iso, tz=dd.TZ), base, shared.config(), settings, p)
+        return held["d"]
+
+    with st.container(horizontal=True):
+        st.download_button("Day summary (JSON)",
+                           dd.export_summary(day, settings, out, v, shared.config()),
+                           file_name=f"day_summary_{tag}.json", mime="application/json",
+                           icon=":material/description:", on_click="ignore")
+        st.download_button("Hourly grid and EV load (CSV)", dd.export_hourly(out),
+                           file_name=f"hourly_{tag}.csv", mime="text/csv", icon=":material/table:",
+                           on_click="ignore")
+        st.download_button("Every car's outcome (CSV)", lambda: dd.export_sessions(_detail()),
+                           file_name=f"sessions_{tag}.csv", mime="text/csv", icon=":material/directions_car:",
+                           on_click="ignore")
+        st.download_button("Smart-charging schedule, every 15 min (CSV)",
+                           lambda: dd.export_schedule(_detail()),
+                           file_name=f"schedule_smart_{tag}.csv", mime="text/csv", icon=":material/schedule:",
+                           on_click="ignore")
+
 with st.expander("For experts: every metric", icon=":material/table_chart:"):
     st.dataframe(dd.metrics_for_display(m), alt="All metrics for the chosen day")
     st.page_link("app_pages/drivers.py", label="See how individual drivers are affected",
