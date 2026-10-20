@@ -103,7 +103,7 @@ def risk_bands(window: pd.DataFrame) -> alt.Chart:
 
 def grid_chart(window: pd.DataFrame) -> alt.Chart:
     df = window.copy()
-    df["hour"] = _wallclock(df.index) + pd.Timedelta(minutes=30)       # plot at mid-hour
+    df["hour"] = _wallclock(df.index).shift(30, freq="min")       # plot at mid-hour
     df["risk_low"] = df[["net_load_mw", "nlmin_mw"]].min(axis=1)
     x = alt.X("hour:T", title=None, axis=alt.Axis(format="%H:%M", tickCount=10))
     area = alt.Chart(df).mark_area(color=RISK, opacity=0.30, interpolate="linear").encode(
@@ -131,7 +131,7 @@ def grid_chart(window: pd.DataFrame) -> alt.Chart:
 
 
 def ev_chart(window: pd.DataFrame, loads: pd.DataFrame) -> alt.Chart:
-    df = dd.long_loads(loads.set_axis(_wallclock(loads.index) + pd.Timedelta(minutes=30)))
+    df = dd.long_loads(loads.set_axis(_wallclock(loads.index).shift(30, freq="min")))
     x = alt.X("hour:T", title=None, axis=alt.Axis(format="%H:%M", tickCount=10))
     color = alt.Color("label:N", scale=COLOR_SCALE, title=None)
     dash = alt.StrokeDash("is_forecast:N", legend=None,
