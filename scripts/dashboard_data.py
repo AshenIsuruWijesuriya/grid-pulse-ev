@@ -174,4 +174,6 @@ def assumptions(cfg: dict) -> pd.DataFrame:
             ("Declared-departure share", c["declared_departure_fraction"], "provisional"),
             ("Objective weights", json.dumps(c["weights"]), "swept in SO5 (no single right weighting)"),
             ("Session source", cfg["sessions"]["source"], cfg["sessions"].get("source_note", ""))]
-    return pd.DataFrame(rows, columns=["Parameter", "Value", "Source"])
+    out = pd.DataFrame(rows, columns=["Parameter", "Value", "Source"])
+    out["Value"] = out["Value"].map(lambda v: "off" if v is None else str(v))   # mixed types
+    return out
