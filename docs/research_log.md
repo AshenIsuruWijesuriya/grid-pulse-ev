@@ -477,3 +477,50 @@ same functions as the experiments.
 - Still not done:
   - group-wide export scheme (FR12);
   - expert usability review (NFR5, WBS 5.12).
+
+## 2026-10-20 — User-friendly prototype (WBS 5.11, FR13, NFR5)
+
+**Activity:** Replaced the single analyst dashboard with a guided five-page
+prototype, `app/streamlit_app.py`. It is written for people who have not read
+the method.
+
+**Design choices:**
+- *Plain names.* The strategies are called *Charge on arrival* (today),
+  *Charge when sunny* (current advice) and *Smart charging* (this research).
+  Charts and tables say "clean power wasted", "evening peak added by EVs" and
+  "extra wait".
+- *Ready-made days* (all from the 2024 record), plus any usable day:
+  - Sunny Sunday, 3 Nov: most wasted power in 2028;
+  - Monsoon wind day, 9 June: risk after the solar peak;
+  - Ordinary weekday, 5 Nov: no waste, same week.
+- *A written verdict* for each planned day (`dashboard_data.verdict`). It says
+  when charging-when-sunny does as well and why (the surplus sits on the
+  sunniest hours).
+- *A driver's view* (`dashboard_data.driver_examples`). It follows a typical
+  morning commuter, midday shopper and evening visitor, chosen as the median
+  driver whose charging smart charging moves, not the most extreme. A timeline
+  shows each option on its own row, because overlaid lines hid each other.
+  Each driver is shown leaving with their full energy.
+- *Expert settings* (NLmin, SNSP, declared share, weights) sit in a collapsed
+  section. Full tables sit in collapsed sections on the Evidence page.
+- *Pages:*
+  - Start here;
+  - Plan a day;
+  - A driver's view;
+  - Evidence;
+  - How it works (method in four steps; real, modelled or assumed; sources;
+    glossary; limits).
+
+**Validation:**
+- Every page runs headless under Streamlit `AppTest` with no exceptions,
+  errors or warnings (`tests/test_app.py`).
+- Every chart was rendered to PNG and inspected. This led to two fixes:
+  - bar labels were clipped;
+  - overlapping driver lines were replaced by the timeline.
+- The verdict and driver examples have synthetic tests:
+  - every example driver leaves with exactly the energy requested;
+  - no charging happens while unplugged.
+- Tests: 159 passed.
+
+**Next:** Usability check with a planner (NFR5, WBS 5.12). Record a fallback
+screen capture before the presentation.

@@ -5,6 +5,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
@@ -62,6 +63,45 @@ def test_solve_one_day_matches_pool_and_is_audited():
     assert m.loc["curtailment_aware", "absorbed_mwh"] >= m.loc["uncontrolled", "absorbed_mwh"]
     shown = dd.metrics_for_display(m)
     assert "Absorbed (MWh)" in shown.columns and shown["Completion"].str.endswith("%").all()
+
+
+def test_verdict_is_plain_and_matches_metrics():
+    base, cfg = _base(), _cfg()
+    s = dd.Settings(2024, 520.0, 0.75, 40, 0.8, {"curtailment": 1.0, "peak": 1.0, "delay": 0.01})
+    day = pd.Timestamp("2024-03-04", tz=TZ)
+    out = dd.solve_one_day(day, base, cfg, s, strategies=["uncontrolled", "solar_following",
+                                                          "curtailment_aware"])
+    v = dd.verdict(day, out)
+    assert v["has_risk"] and v["risk_mwh"] > 0
+    assert v["grid"].startswith("On Monday 4 March")
+    pct = int(round(out["metrics"].loc["curtailment_aware", "evening_peak_reduction_pct_of_ev_increase"]))
+    assert f"removes {pct}% of that" in v["peak"] and "-0%" not in v["peak"]
+    assert "100% of cars leave fully charged" in v["drivers"]
+
+
+def test_verdict_without_risk_says_nothing_is_wasted():
+    base, cfg = _base(), _cfg()
+    s = dd.Settings(2024, 0.0, None, 40, 0.8, {"curtailment": 1.0, "peak": 1.0, "delay": 0.01})
+    day = pd.Timestamp("2024-03-04", tz=TZ)
+    v = dd.verdict(day, dd.solve_one_day(day, base, cfg, s, strategies=["uncontrolled",
+                                                                       "curtailment_aware"]))
+    assert not v["has_risk"] and "no clean power is wasted" in v["grid"] and v["clean"] == ""
+
+
+def test_driver_examples_are_complete_and_inside_plug_in_window():
+    base, cfg = _base(), _cfg(sessions=400)
+    s = dd.Settings(2024, 520.0, 0.75, 400, 1.0, {"curtailment": 1.0, "peak": 1.0, "delay": 0.01})
+    ex = dd.driver_examples(pd.Timestamp("2024-03-04", tz=TZ), base, cfg, s)
+    assert ex, "expected at least one example driver"
+    for e in ex:
+        assert e["group"] in {"Morning commuter", "Midday shopper", "Evening visitor"}
+        assert 0 < e["group_moved"] <= e["group_size"]
+        for strat, kwh in e["delivered_kwh"].items():
+            assert kwh == pytest.approx(e["energy_kwh"], abs=1e-3)        # every car leaves full
+            assert e["arrival"] < e["finish"][strat] <= e["departure"]
+        p = e["power_kw"]
+        outside = (p.index < e["arrival"]) | (p.index >= e["departure"])
+        assert (p[outside].abs() < 1e-6).all().all()                     # never charges unplugged
 
 
 def test_long_loads_and_assumptions_are_tidy():

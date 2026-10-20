@@ -31,7 +31,7 @@ py -3 -m venv .venv
 
 If `py -3` is not found, try `python -m venv .venv`. You **do not have to activate** the virtual environment, because the commands above invoke its Python directly.
 
-Expected test result: `150 passed` (the exact run time can vary).
+Expected test result: `159 passed` (the exact run time can vary).
 
 ## Optional: download a pilot NASA POWER solar/weather dataset
 
@@ -70,22 +70,27 @@ Run from the project root once the PUCSL 2024 data are preprocessed and the NASA
 - `run_experiments.py`: comparison on a weekly sample and on every risk day, weight trade-off, sensitivity, and forecast-based planning (SO5/SO6). `--workers` solves days in parallel. Outputs go to `results/experiments/`.
 - `benchmark_scaling.py`: solve time from 1,000 to 30,000 sessions on one day (NFR1, NFR2).
 
-### Dashboard (WBS 5.11, FR13)
+### Prototype app (WBS 5.11, FR13)
 
 ```powershell
-.\.venv\Scripts\streamlit.exe run app\dashboard.py
+.\.venv\Scripts\streamlit.exe run app\streamlit_app.py
 ```
 
-Opens at http://localhost:8501 (this computer only; see `.streamlit/config.toml`).
+Opens at http://localhost:8501 (this computer only; see `.streamlit/config.toml`). It is written for people who have not read the method, so the strategies have plain names: *Charge on arrival* (today), *Charge when sunny* (current advice) and *Smart charging* (this research).
 
-- **Schedule a day:** pick any usable 2024 day and change the scenario year, NLmin, SNSP limit, sessions per day, declared-departure share or weights. The scheduler runs live and shows:
-  - residual load against NLmin, with the risk hours marked;
-  - the EV load of each strategy on common axes;
-  - the metrics table.
+- **Start here:** the problem, the idea, who it is for, and the headline results of the full-year study.
+- **Plan a day:** pick a ready-made day or any usable 2024 day, a scenario year and the number of cars. The scheduler plans every car live and shows:
+  - a written verdict for the day;
+  - when clean power would be wasted;
+  - when the cars charge under each option;
+  - a side-by-side table.
 
-  With the default settings, a day from the experiment uses exactly the experiment's sessions, so it reproduces the saved results.
-- **Experiment results**, **Scenario years** and **Assumptions** show the saved SO5/SO6 results, the LTGEP scenario years, and every parameter with its source.
-- The page logic is in `scripts/dashboard_data.py`, which is tested. It calls the same functions as the experiments.
+  Expert settings (NLmin, SNSP, declared share, weights) are in a collapsed section.
+- **A driver's view:** a typical driver from three groups (morning commuter, midday shopper, evening visitor). It shows when their car charges under each option, and that it leaves full.
+- **Evidence:** the saved SO5/SO6 results in plain words, with all tables in a collapsed section.
+- **How it works:** the method in four steps, what is real, modelled or assumed, every parameter with its source, a glossary and the limits.
+
+With the default settings, a day from the experiment uses exactly the experiment's sessions, so it reproduces the saved results. All page logic is in `scripts/dashboard_data.py`, which is tested and calls the same functions as the experiments. `tests/test_app.py` runs every page headless.
 
 Every assumed parameter is in `config/scenarios.json`. Values tagged `provisional` must be replaced or approved before results are reported.
 
