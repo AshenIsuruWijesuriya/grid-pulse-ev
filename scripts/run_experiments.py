@@ -101,6 +101,23 @@ def sample_days(days: list[pd.Timestamp]) -> list[pd.Timestamp]:
     return out
 
 
+def ml_forecast_plan(base: pd.DataFrame, cfg: dict, **override) -> pd.DataFrame | None:
+    """Signal built from the day-ahead ML forecast (forecast_grid.py), or None if absent.
+
+    `override` takes the same keywords as bgs.scenario_kwargs, so the plan uses
+    the same scenario as the signal it is scored on.
+    """
+    fpath = PROJECT_ROOT / "data/processed/grid" / f"grid_forecast_{cfg['grid']['year']}_hourly.csv"
+    if not fpath.is_file():
+        return None
+    fc = pd.read_csv(fpath)
+    fc.index = pd.to_datetime(fc["hour_start_local"], utc=True).dt.tz_convert(TZ)
+    fbase = base.copy()
+    for col in ("demand_system_mw", "solar_available_mw", "wind_mw", "must_take_mw"):
+        fbase[col] = fc[col].reindex(base.index)
+    return bgs.scenario_signal(fbase, **bgs.scenario_kwargs(cfg, **override))
+
+
 def persistence_plan(signal: pd.DataFrame) -> pd.DataFrame:
     plan = signal.copy()
     plan[PLAN_COLUMNS] = signal[PLAN_COLUMNS].shift(24)
@@ -404,14 +421,9 @@ def main() -> None:
 
     # SO5 central comparison
     strategies, plans = list(STRATEGIES), {}
-    fpath = PROJECT_ROOT / "data/processed/grid" / f"grid_forecast_{cfg['grid']['year']}_hourly.csv"
-    if fpath.is_file():
-        fc = pd.read_csv(fpath)
-        fc.index = pd.to_datetime(fc["hour_start_local"], utc=True).dt.tz_convert(TZ)
-        fbase = base.copy()
-        for col in ("demand_system_mw", "solar_available_mw", "wind_mw", "must_take_mw"):
-            fbase[col] = fc[col].reindex(base.index)
-        plans["_ml"] = bgs.scenario_signal(fbase, **bgs.scenario_kwargs(cfg))
+    ml = ml_forecast_plan(base, cfg)
+    if ml is not None:
+        plans["_ml"] = ml
         strategies.append("curtailment_aware_ml")
     else:
         print("No forecast file; run forecast_grid.py to add the ML-forecast strategy.")
