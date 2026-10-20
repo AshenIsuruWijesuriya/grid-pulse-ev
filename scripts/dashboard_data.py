@@ -301,16 +301,19 @@ def visitor_session(day: pd.Timestamp, arrival: str, departure: str, energy_kwh:
     The car joins the least busy station that day, declares its departure, and
     its request is capped at what the charger can deliver in the time plugged in.
     """
-    arr = day + pd.Timedelta(arrival + ":00")
-    dep = day + pd.Timedelta(departure + ":00")
+    def at(hhmm: str) -> pd.Timestamp:
+        h, m = (int(x) for x in hhmm.split(":"))
+        if m % 15:
+            raise ValueError("times must be on the quarter hour")
+        return day + pd.offsets.Hour(h) + pd.offsets.Minute(m)
+
+    arr, dep = at(arrival), at(departure)
     if dep <= arr:
         dep += pd.offsets.Day(1)
-    if (arr.minute % 15) or (dep.minute % 15):
-        raise ValueError("times must be on the quarter hour")
     latest = day + pd.offsets.Day(1) + pd.offsets.Hour(9)
     if dep > latest:
         raise ValueError("the car must leave by 09:00 the next morning")
-    slots = int((dep - arr) / pd.Timedelta(minutes=15))
+    slots = int((dep.value - arr.value) // (15 * 60 * 10**9))
     deliverable = charger_kw * slots * sch.STEP_HOURS
     n_stations = max(1, int(np.ceil(len(sessions) / sessions_per_station)))
     busy = sessions["station_id"].value_counts().reindex(range(n_stations), fill_value=0)
@@ -349,7 +352,7 @@ def my_charge(day: pd.Timestamp, base: pd.DataFrame, cfg: dict, settings: Settin
                   "clean_kwh": float(kwh[d["risk_slot"]].sum()),
                   "clean_share": float(kwh[d["risk_slot"]].sum() / total) if total else 0.0,
                   "evening_kwh": float(kwh[d["evening_slot"]].sum()),
-                  "extra_wait_min": max(0.0, (fin - earliest) / pd.Timedelta(minutes=1))}
+                  "extra_wait_min": max(0.0, (fin.value - earliest.value) / 60e9)}
     out.update(arrival=prob.slots[prob.arr[i]],
                departure=prob.slots[0] + pd.offsets.Minute(15 * int(prob.dep[i])),
                energy_kwh=float(prob.energy[i]), charger_kw=float(prob.pmax[i]),
