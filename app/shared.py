@@ -63,11 +63,35 @@ def solve(day_iso: str, settings: dd.Settings) -> dict:
     return dd.solve_one_day(pd.Timestamp(day_iso, tz=dd.TZ), base, config(), settings, pool=p)
 
 
-@st.cache_data(show_spinner=False, max_entries=24)
-def drivers(day_iso: str, settings: dd.Settings) -> list[dict]:
+@st.cache_resource(show_spinner=False, max_entries=6)
+def detail(day_iso: str, settings: dd.Settings) -> dict:
+    """The day planned with every car's 15-minute schedule (shared by several pages)."""
     base, _ = inputs()
     p = pool(settings.sessions_per_day, settings.declared_departure_fraction)
-    return dd.driver_examples(pd.Timestamp(day_iso, tz=dd.TZ), base, config(), settings, pool=p)
+    return dd.day_detail(pd.Timestamp(day_iso, tz=dd.TZ), base, config(), settings, p)
+
+
+@st.cache_data(show_spinner=False, max_entries=24)
+def drivers(day_iso: str, settings: dd.Settings) -> list[dict]:
+    return dd.driver_examples(pd.Timestamp(day_iso, tz=dd.TZ), None, config(), settings,
+                              detail=detail(day_iso, settings))
+
+
+@st.cache_data(show_spinner=False, max_entries=32)
+def my_charge(day_iso: str, settings: dd.Settings, arrival: str, departure: str, energy_kwh: float,
+              charger_kw: float) -> dict:
+    base, _ = inputs()
+    p = pool(settings.sessions_per_day, settings.declared_departure_fraction)
+    return dd.my_charge(pd.Timestamp(day_iso, tz=dd.TZ), base, config(), settings, p, arrival, departure,
+                        energy_kwh, charger_kw)
+
+
+def peak_hours_label(grid: pd.DataFrame, day: pd.Timestamp) -> str:
+    """The day's peak window as text, e.g. '18:00-20:00'."""
+    h = grid.index[grid["is_peak_window"].fillna(False).astype(bool) & (grid.index.normalize() == day)]
+    if not len(h):
+        return "the peak hours"
+    return f"{h.min():%H:%M}-{h.max() + pd.offsets.Hour(1):%H:%M}"
 
 
 @st.cache_data(show_spinner=False)
@@ -263,37 +287,80 @@ def ev_chart(window: pd.DataFrame, loads: pd.DataFrame, shown: list[str]) -> alt
                                  "power would be wasted. Evening peak: 17:00 to midnight."))
 
 
-def driver_chart(example: dict, window: pd.DataFrame) -> alt.LayerChart:
-    """One driver's charging as a timeline: one row per option, a bar where the car charges.
+def timeline_chart(rows: list[dict], window: pd.DataFrame) -> alt.LayerChart:
+    """Charging as a timeline: one row each, a block for every 15 minutes of charging.
 
-    Rows rather than overlaid lines, because options that charge at the same
-    time would hide each other. Lighter bars mean the charger ran below full power.
+    rows: dicts with label, power (kW series on the slot index), color, max_kw,
+    start and end (plug-in window, drawn grey). Rows rather than overlaid lines,
+    because rows that charge at the same time would hide each other. Lighter
+    blocks mean the charger ran below full power.
     """
-    p = example["power_kw"]
-    lo, hi = example["arrival"] - pd.offsets.Hour(1), example["departure"] + pd.offsets.Hour(1)
-    p = p[(p.index >= lo) & (p.index < hi)]
-    drawn = [s for s in ORDER if s in p.columns]
-    rows = [friendly(s) for s in drawn]
-    t = _wallclock(p.index)
-    x_dom = [t.min().isoformat(), (t.max() + pd.offsets.Minute(15)).isoformat()]
-    df = pd.DataFrame([{"start": ts, "end": ts + pd.offsets.Minute(15), "label": friendly(s),
-                        "kw": float(p[s].iloc[k]), "share": float(p[s].iloc[k]) / example["charger_kw"]}
-                       for s in drawn for k, ts in enumerate(t) if p[s].iloc[k] > 1e-3])
-    x = alt.X("start:T", title=None, scale=alt.Scale(domain=x_dom),
-              axis=alt.Axis(format="%H:%M", tickCount=10))
-    y = alt.Y("label:N", title=None, sort=rows, axis=alt.Axis(labelLimit=200, labelFontSize=12))
-    plugged = pd.DataFrame({"start": [example["arrival"].tz_localize(None)],
-                            "end": [example["departure"].tz_localize(None)]})
-    band = alt.Chart(plugged).mark_rect(color=INK_2, opacity=0.08).encode(x=x, x2="end:T")
+    lo = min(r["start"] for r in rows) - pd.offsets.Hour(1)
+    hi = max(r["end"] for r in rows) + pd.offsets.Hour(1)
+    labels = [r["label"] for r in rows]
+    blocks, plugs = [], []
+    for r in rows:
+        p = r["power"][(r["power"].index >= lo) & (r["power"].index < hi)]
+        for ts, kw in zip(_wallclock(p.index), p.to_numpy()):
+            if kw > 1e-3:
+                blocks.append({"start": ts, "end": ts + pd.offsets.Minute(15), "label": r["label"],
+                               "kw": float(kw), "share": float(kw) / r["max_kw"]})
+        plugs.append({"start": r["start"].tz_localize(None), "end": r["end"].tz_localize(None),
+                      "label": r["label"]})
+    x_dom = [lo.tz_localize(None).isoformat(), hi.tz_localize(None).isoformat()]
+    x = alt.X("start:T", title=None, scale=alt.Scale(domain=x_dom), axis=alt.Axis(format="%H:%M", tickCount=10))
+    y = alt.Y("label:N", title=None, sort=labels, axis=alt.Axis(labelLimit=220, labelFontSize=12))
+    plug = alt.Chart(pd.DataFrame(plugs)).mark_rect(color=INK_2, opacity=0.09, height=30).encode(
+        x=x, x2="end:T", y=y)
     w = window[(window.index >= lo.floor("h")) & (window.index < hi)]
-    bars = alt.Chart(df).mark_rect(height=22, cornerRadius=2).encode(
+    colors = list(dict.fromkeys((r["label"], r["color"]) for r in rows))
+    bars = alt.Chart(pd.DataFrame(blocks)).mark_rect(height=22, cornerRadius=2).encode(
         x=x, x2="end:T", y=y,
-        color=alt.Color("label:N", legend=None, scale=alt.Scale(domain=rows, range=[rx.COLORS[s] for s in drawn])),
+        color=alt.Color("label:N", legend=None, scale=alt.Scale(domain=[c[0] for c in colors],
+                                                                range=[c[1] for c in colors])),
         opacity=alt.Opacity("share:Q", legend=None, scale=alt.Scale(domain=[0, 1], range=[0.35, 1])),
-        tooltip=[alt.Tooltip("label:N", title="Option"), alt.Tooltip("start:T", format="%H:%M", title="From"),
+        tooltip=[alt.Tooltip("label:N", title=" "), alt.Tooltip("start:T", format="%H:%M", title="From"),
                  alt.Tooltip("end:T", format="%H:%M", title="To"),
                  alt.Tooltip("kw:Q", format=".1f", title="Charging power (kW)")])
-    return (band + risk_bands(w) + bars).properties(height=40 * len(drawn) + 30)
+    return (risk_bands(w) + plug + bars).properties(height=38 * len(rows) + 30)
+
+
+def driver_chart(example: dict, window: pd.DataFrame) -> alt.LayerChart:
+    """One driver's charging under each option (a row per option)."""
+    rows = [{"label": friendly(s), "power": example["power_kw"][s], "color": rx.COLORS[s],
+             "max_kw": example["charger_kw"], "start": example["arrival"], "end": example["departure"]}
+            for s in ORDER if s in example["power_kw"].columns]
+    return timeline_chart(rows, window)
+
+
+def station_power_chart(view: dict, window: pd.DataFrame) -> alt.LayerChart:
+    """The station's total power under each option against its connection limit."""
+    tot = view["totals_kw"]
+    used = tot[(tot.sum(axis=1) > 1e-3)]
+    lo, hi = used.index.min() - pd.offsets.Hour(1), used.index.max() + pd.offsets.Hour(1)
+    tot = tot[(tot.index >= lo) & (tot.index < hi)]
+    drawn = [s for s in ORDER if s in tot.columns]
+    df = (tot.set_axis(_wallclock(tot.index)).rename_axis("t").reset_index()
+          .melt("t", var_name="strategy", value_name="kw"))
+    df["label"] = df["strategy"].map(friendly)
+    x = alt.X("t:T", title=None, axis=alt.Axis(format="%H:%M", tickCount=10))
+    lines = alt.Chart(df).mark_line(strokeWidth=2.5, interpolate="step-after").encode(
+        x=x, y=alt.Y("kw:Q", title="Station power (kW)",
+                     scale=alt.Scale(domain=[0, view["capacity_kw"] * 1.15])),
+        color=alt.Color("label:N", title=None, scale=alt.Scale(
+            domain=[friendly(s) for s in drawn], range=[rx.COLORS[s] for s in drawn])),
+        tooltip=[alt.Tooltip("t:T", format="%H:%M", title="From"), alt.Tooltip("label:N", title="Option"),
+                 alt.Tooltip("kw:Q", format=".1f", title="kW")])
+    cap = alt.Chart(pd.DataFrame({"cap": [view["capacity_kw"]]})).mark_rule(
+        color=INK, strokeDash=[6, 4], strokeWidth=1.5).encode(y="cap:Q")
+    cap_text = alt.Chart(pd.DataFrame({"cap": [view["capacity_kw"]],
+                                       "t": [_wallclock(pd.DatetimeIndex([lo]))[0]]})).mark_text(
+        align="left", dx=4, dy=-8, color=INK, fontSize=12).encode(
+        x="t:T", y="cap:Q", text=alt.value(f"Connection limit {view['capacity_kw']:g} kW"))
+    w = window[(window.index >= lo.floor("h")) & (window.index < hi)]
+    return (risk_bands(w) + cap + cap_text + lines).properties(
+        height=280, title=_title("Power drawn by the whole station",
+                                 "Every option stays under the station's connection limit (dashed)."))
 
 
 def years_chart(yrs: pd.DataFrame) -> alt.Chart:
