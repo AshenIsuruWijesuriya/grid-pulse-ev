@@ -68,8 +68,12 @@ with st.container(border=True):
     else:
         st.markdown(":material/solar_power: No clean power is wasted while you are plugged in on this day, so "
                     "smart charging is about the evening peak instead.")
-    st.markdown(f":material/trending_down: You add **{smart['peak_kwh']:.1f} kWh** to the grid's busiest "
-                f"hours ({peak_label}), against {unc['peak_kwh']:.1f} kWh charging on arrival.")
+    if max(smart["peak_kwh"], unc["peak_kwh"]) < 0.05:
+        st.markdown(f":material/trending_down: Your car is not charging during the grid's busiest hours "
+                    f"({peak_label}) with either option, so it adds nothing to the evening peak.")
+    else:
+        st.markdown(f":material/trending_down: You add **{smart['peak_kwh']:.1f} kWh** to the grid's busiest "
+                    f"hours ({peak_label}), against {unc['peak_kwh']:.1f} kWh charging on arrival.")
     st.markdown(f":material/check_circle: You leave with **all {smart['delivered_kwh']:.1f} kWh** you asked for.")
 
 with st.container(horizontal=True):
