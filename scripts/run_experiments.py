@@ -118,6 +118,23 @@ def ml_forecast_plan(base: pd.DataFrame, cfg: dict, **override) -> pd.DataFrame 
     return bgs.scenario_signal(fbase, **bgs.scenario_kwargs(cfg, **override))
 
 
+def experiment_days(base: pd.DataFrame, cfg: dict, quick: bool = False) -> dict:
+    """The day sets of the experiment, derived from the central scenario.
+
+    Sessions are drawn for `all` in one pass, so any tool that wants the
+    experiment's exact sessions for a day must draw them over this same set.
+    """
+    days_all = schedulable_days(base)
+    central = sample_days(days_all)
+    sig = bgs.scenario_signal(base, **bgs.scenario_kwargs(cfg))
+    risk_by_day = sig["curtailment_risk_mw"].groupby(sig.index.normalize()).sum()
+    risk = [d for d in days_all if risk_by_day.get(d, 0) > 0]
+    if quick:
+        central, risk = central[13:17], risk[:2]
+    return {"schedulable": days_all, "central": central, "sweep": central, "risk": risk,
+            "all": sorted(set(central) | set(risk))}
+
+
 def persistence_plan(signal: pd.DataFrame) -> pd.DataFrame:
     plan = signal.copy()
     plan[PLAN_COLUMNS] = signal[PLAN_COLUMNS].shift(24)
@@ -390,11 +407,9 @@ def main() -> None:
     c = cfg["central"]
     seed = int(cfg["sessions"]["seed"])
     base = load_base(cfg)
-    days_all = schedulable_days(base)
-    central_days = sample_days(days_all)
-    sweep_days = central_days
-    if args.quick:
-        central_days = sweep_days = central_days[13:17]
+    ed = experiment_days(base, cfg, args.quick)
+    days_all, central_days, risk_days = ed["schedulable"], ed["central"], ed["risk"]
+    sweep_days, all_days = ed["sweep"], ed["all"]
     out = args.outdir
     (out / "figures").mkdir(parents=True, exist_ok=True)
 
@@ -409,10 +424,6 @@ def main() -> None:
 
     central_signal = signal_for()
     risk_by_day = central_signal["curtailment_risk_mw"].groupby(central_signal.index.normalize()).sum()
-    risk_days = [d for d in days_all if risk_by_day.get(d, 0) > 0]
-    if args.quick:
-        risk_days = risk_days[:2]
-    all_days = sorted(set(central_days) | set(sweep_days) | set(risk_days))
     sessions = evs.build_session_set(all_days, cfg, seed, gmm)
     plaus = evs.plausibility(sessions, c["kwh_per_km"])
     print(f"{len(days_all)} schedulable days; central sample {len(central_days)}, "

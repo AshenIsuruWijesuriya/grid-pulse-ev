@@ -84,12 +84,24 @@ def day_table(sig: pd.DataFrame, days: list[pd.Timestamp]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def session_pool(base: pd.DataFrame, cfg: dict, settings: Settings) -> pd.DataFrame:
+    """Sessions drawn over the experiment's day set, as run_experiments.py draws them.
+
+    With the central session settings, a day from that set gets exactly the
+    sessions it had in the saved experiment. The day set itself always comes
+    from the configured central scenario, not from the dashboard's grid settings.
+    """
+    days = rx.experiment_days(base, cfg)["all"]
+    return evs.build_session_set(days, settings.apply(cfg), int(cfg["sessions"]["seed"]))
+
+
 def solve_one_day(day: pd.Timestamp, base: pd.DataFrame, cfg: dict, settings: Settings,
-                  strategies: list[str] | None = None) -> dict:
+                  strategies: list[str] | None = None, pool: pd.DataFrame | None = None) -> dict:
     """Run every strategy on one day under `settings`.
 
-    Returns the hourly grid window, hourly EV load per strategy (MW), the
-    metrics table, and the day's status (dropped strategies are reported).
+    `pool` is a session_pool(); days outside it get their own draw. Returns the
+    hourly grid window, hourly EV load per strategy (MW), the metrics table,
+    and the day's status (dropped strategies are reported).
     """
     run_cfg = settings.apply(cfg)
     c = run_cfg["central"]
@@ -102,7 +114,10 @@ def solve_one_day(day: pd.Timestamp, base: pd.DataFrame, cfg: dict, settings: Se
             strategies.remove("curtailment_aware_ml")
         else:
             plans["_ml"] = ml
-    sessions = evs.build_session_set([day], run_cfg, int(run_cfg["sessions"]["seed"]))
+    key = day.strftime("%Y-%m-%d")
+    in_pool = pool is not None and (pool["day"] == key).any()
+    sessions = pool[pool["day"] == key] if in_pool else evs.build_session_set(
+        [day], run_cfg, int(run_cfg["sessions"]["seed"]))
     res = rx.run_case([day], sessions, sig, run_cfg, strategies, c["weights"],
                       c["station_capacity_kw"], plans)
     hours = pd.date_range(day, periods=30, freq="h")
@@ -112,7 +127,7 @@ def solve_one_day(day: pd.Timestamp, base: pd.DataFrame, cfg: dict, settings: Se
                          index=hours)
     metrics = pd.DataFrame(res["metrics"]).T.reindex(columns=list(METRIC_COLUMNS))
     return {"window": window, "loads": loads, "metrics": metrics,
-            "dropped": res["dropped_days"], "sessions": len(sessions)}
+            "dropped": res["dropped_days"], "sessions": len(sessions), "experiment_sessions": in_pool}
 
 
 def metrics_for_display(metrics: pd.DataFrame) -> pd.DataFrame:
