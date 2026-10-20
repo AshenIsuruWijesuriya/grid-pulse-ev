@@ -211,27 +211,61 @@ def verdict(day: pd.Timestamp, out: dict) -> dict:
             "peak": peak, "drivers": drivers}
 
 
+DETAIL_STRATEGIES = ["uncontrolled", "solar_following", "curtailment_aware"]
+VISITOR_ID = "YOU"
+
+
+def day_detail(day: pd.Timestamp, base: pd.DataFrame, cfg: dict, settings: Settings,
+               pool: pd.DataFrame | None = None, extra: pd.DataFrame | None = None) -> dict:
+    """Solve one day keeping every session's 15-minute schedule (sessions x slots, kW).
+
+    `extra` adds sessions (a visitor's own trip) before solving. `feasible` is
+    False when any LP is infeasible; then `P` is empty, never a relaxed plan.
+    """
+    run_cfg = settings.apply(cfg)
+    c = run_cfg["central"]
+    sig = signal(base, run_cfg)
+    sessions, in_pool = _day_sessions(day, run_cfg, pool)
+    if extra is not None:
+        sessions = pd.concat([sessions, extra], ignore_index=True)
+    prob = sch.day_problem(day, sessions, c["station_capacity_kw"])
+    grid_hours = sig.reindex(prob.hours)
+    risk_slot = (grid_hours["curtailment_risk_mw"].fillna(0.0).to_numpy() > 0)[prob.slot_hour]
+    ev0, ev1 = run_cfg["grid"]["evening_hours"]
+    evening_slot = np.asarray((prob.slots.hour >= ev0) & (prob.slots.hour <= ev1)
+                              & (prob.slots.normalize() == day))
+    P, status = {}, {}
+    for s in DETAIL_STRATEGIES:
+        grid = sch.plan_grid(sig, prob.hours) if s != "uncontrolled" else None
+        r = sch.run_strategy(prob, s, grid, c["weights"])
+        status[s] = r["status"]
+        if r["status"] not in ("optimal", "simulated"):
+            return {"prob": prob, "P": {}, "status": status, "feasible": False, "settings": settings,
+                    "risk_slot": risk_slot, "evening_slot": evening_slot, "grid": grid_hours,
+                    "experiment_sessions": in_pool}
+        P[s] = r["P"]
+    return {"prob": prob, "P": P, "status": status, "feasible": True, "settings": settings,
+            "risk_slot": risk_slot, "evening_slot": evening_slot, "grid": grid_hours,
+            "experiment_sessions": in_pool}
+
+
+def _finish(prob, row: np.ndarray) -> pd.Timestamp:
+    on = np.flatnonzero(row > 1e-3)
+    return prob.slots[on.max()] + pd.offsets.Minute(15) if len(on) else prob.slots[0]
+
+
 def driver_examples(day: pd.Timestamp, base: pd.DataFrame, cfg: dict, settings: Settings,
-                    pool: pd.DataFrame | None = None) -> list[dict]:
+                    pool: pd.DataFrame | None = None, detail: dict | None = None) -> list[dict]:
     """A typical driver from three groups, with their charging under each strategy.
 
     For each group the driver shown is the median by how far smart charging
     moves their charging time, among drivers it moves at all: typical, not the
     most extreme. Returns [] when the day is infeasible.
     """
-    run_cfg = settings.apply(cfg)
-    c = run_cfg["central"]
-    sig = signal(base, run_cfg)
-    sessions, _ = _day_sessions(day, run_cfg, pool)
-    prob = sch.day_problem(day, sessions, c["station_capacity_kw"])
-    shown = ["uncontrolled", "solar_following", "curtailment_aware"]
-    P = {}
-    for s in shown:
-        grid = sch.plan_grid(sig, prob.hours) if s != "uncontrolled" else None
-        r = sch.run_strategy(prob, s, grid, c["weights"])
-        if r["status"] not in ("optimal", "simulated"):
-            return []
-        P[s] = r["P"]
+    detail = detail or day_detail(day, base, cfg, settings, pool)
+    if not detail["feasible"]:
+        return []
+    prob, P, shown = detail["prob"], detail["P"], DETAIL_STRATEGIES
     t = np.arange(prob.n_slots)
     centre = {s: (P[s] * t).sum(axis=1) / np.maximum(P[s].sum(axis=1), 1e-9) for s in shown}
     shift = np.abs(centre["curtailment_aware"] - centre["uncontrolled"]) / 4      # hours
@@ -249,8 +283,7 @@ def driver_examples(day: pd.Timestamp, base: pd.DataFrame, cfg: dict, settings: 
             continue
         i = idx[np.argsort(shift[idx])[len(idx) // 2]]
         power = pd.DataFrame({s: P[s][i] for s in shown}, index=prob.slots)
-        finish = {s: prob.slots[np.flatnonzero(P[s][i] > 1e-3).max()] + pd.offsets.Minute(15)
-                  for s in shown}
+        finish = {s: _finish(prob, P[s][i]) for s in shown}
         out.append({"group": name, "blurb": blurb, "session_id": prob.sessions["session_id"].iloc[i],
                     "arrival": prob.slots[prob.arr[i]],
                     "departure": prob.slots[0] + pd.offsets.Minute(15 * int(prob.dep[i])),
@@ -259,6 +292,166 @@ def driver_examples(day: pd.Timestamp, base: pd.DataFrame, cfg: dict, settings: 
                     "delivered_kwh": {s: float(P[s][i].sum() * sch.STEP_HOURS) for s in shown},
                     "group_size": int(mask.sum()), "group_moved": int(len(idx))})
     return out
+
+
+def visitor_session(day: pd.Timestamp, arrival: str, departure: str, energy_kwh: float,
+                    charger_kw: float, sessions: pd.DataFrame, sessions_per_station: int) -> dict:
+    """A visitor's own trip as one session row ("HH:MM" times; leaving earlier means next day).
+
+    The car joins the least busy station that day, declares its departure, and
+    its request is capped at what the charger can deliver in the time plugged in.
+    """
+    arr = day + pd.Timedelta(arrival + ":00")
+    dep = day + pd.Timedelta(departure + ":00")
+    if dep <= arr:
+        dep += pd.offsets.Day(1)
+    if (arr.minute % 15) or (dep.minute % 15):
+        raise ValueError("times must be on the quarter hour")
+    latest = day + pd.offsets.Day(1) + pd.offsets.Hour(9)
+    if dep > latest:
+        raise ValueError("the car must leave by 09:00 the next morning")
+    slots = int((dep - arr) / pd.Timedelta(minutes=15))
+    deliverable = charger_kw * slots * sch.STEP_HOURS
+    n_stations = max(1, int(np.ceil(len(sessions) / sessions_per_station)))
+    busy = sessions["station_id"].value_counts().reindex(range(n_stations), fill_value=0)
+    row = pd.DataFrame({
+        "session_id": [VISITOR_ID], "day": [day.strftime("%Y-%m-%d")], "arrival_local": [arr],
+        "departure_local": [dep], "energy_request_kwh": [round(min(energy_kwh, deliverable), 4)],
+        "max_power_kw": [float(charger_kw)], "energy_capped": [energy_kwh > deliverable],
+        "data_origin": ["visitor"], "station_id": [int(busy.idxmin())], "declares_departure": [True]})
+    return {"row": row, "capped": bool(energy_kwh > deliverable), "deliverable_kwh": deliverable}
+
+
+def my_charge(day: pd.Timestamp, base: pd.DataFrame, cfg: dict, settings: Settings,
+              pool: pd.DataFrame | None, arrival: str, departure: str, energy_kwh: float,
+              charger_kw: float) -> dict:
+    """Plan the day with the visitor's car added, and describe that car's charging."""
+    run_cfg = settings.apply(cfg)
+    sessions, _ = _day_sessions(day, run_cfg, pool)
+    v = visitor_session(day, arrival, departure, energy_kwh, charger_kw, sessions,
+                        int(run_cfg["central"]["sessions_per_station_per_day"]))
+    d = day_detail(day, base, cfg, settings, pool, extra=v["row"])
+    out = {"feasible": d["feasible"], "capped": v["capped"], "station_id": int(v["row"]["station_id"][0]),
+           "deliverable_kwh": v["deliverable_kwh"], "grid": d["grid"]}
+    if not d["feasible"]:
+        return out
+    prob = d["prob"]
+    i = int(np.flatnonzero(prob.sessions["session_id"].to_numpy() == VISITOR_ID)[0])
+    need = int(np.ceil(prob.energy[i] / (prob.pmax[i] * sch.STEP_HOURS) - 1e-9))
+    earliest = prob.slots[prob.arr[i]] + pd.offsets.Minute(15 * need)
+    per = {}
+    for s in DETAIL_STRATEGIES:
+        row = d["P"][s][i]
+        kwh = row * sch.STEP_HOURS
+        total = float(kwh.sum())
+        fin = _finish(prob, row)
+        per[s] = {"finish": fin, "delivered_kwh": total,
+                  "clean_kwh": float(kwh[d["risk_slot"]].sum()),
+                  "clean_share": float(kwh[d["risk_slot"]].sum() / total) if total else 0.0,
+                  "evening_kwh": float(kwh[d["evening_slot"]].sum()),
+                  "extra_wait_min": max(0.0, (fin - earliest) / pd.Timedelta(minutes=1))}
+    out.update(arrival=prob.slots[prob.arr[i]],
+               departure=prob.slots[0] + pd.offsets.Minute(15 * int(prob.dep[i])),
+               energy_kwh=float(prob.energy[i]), charger_kw=float(prob.pmax[i]),
+               power_kw=pd.DataFrame({s: d["P"][s][i] for s in DETAIL_STRATEGIES}, index=prob.slots),
+               per_strategy=per, risk_in_window=bool(d["risk_slot"][prob.arr[i]:prob.dep[i]].any()))
+    return out
+
+
+def station_ids(detail: dict) -> list[int]:
+    """Stations that day, busiest first (most sessions, then lowest id)."""
+    counts = detail["prob"].sessions["station_id"].value_counts()
+    return sorted(counts.index.astype(int), key=lambda k: (-counts[k], k))
+
+
+def station_view(detail: dict, station_id: int) -> dict:
+    """One station's cars and its total power under each strategy (15-minute kW)."""
+    prob, P = detail["prob"], detail["P"]
+    idx = np.flatnonzero(prob.station == station_id)
+    order = idx[np.argsort(prob.arr[idx], kind="stable")]
+    cars = pd.DataFrame({
+        "Car": [f"Car {k + 1}" for k in range(len(order))],
+        "Plugs in": [prob.slots[prob.arr[i]] for i in order],
+        "Leaves": [prob.slots[0] + pd.offsets.Minute(15 * int(prob.dep[i])) for i in order],
+        "Energy (kWh)": prob.energy[order],
+        "Charger (kW)": prob.pmax[order],
+        "Said when leaving": prob.declared[order],
+        **{f"Full by: {FRIENDLY[s]}": [_finish(prob, P[s][i]) for i in order] for s in DETAIL_STRATEGIES},
+    })
+    totals = pd.DataFrame({s: P[s][order].sum(axis=0) for s in DETAIL_STRATEGIES}, index=prob.slots)
+    smart = pd.DataFrame({cars["Car"].iloc[k]: P["curtailment_aware"][i] for k, i in enumerate(order)},
+                         index=prob.slots)
+    return {"cars": cars, "totals_kw": totals, "smart_kw": smart, "capacity_kw": prob.station_capacity_kw,
+            "peak_kw": {s: float(totals[s].max()) for s in DETAIL_STRATEGIES}}
+
+
+# --------------------------------------------------------------------------- #
+# Exports (docs/export_schema.md): interval-start times, Asia/Colombo, ISO 8601
+# --------------------------------------------------------------------------- #
+
+def _iso(ts) -> pd.Series:
+    return pd.Series(pd.DatetimeIndex(ts).strftime("%Y-%m-%dT%H:%M:%S%z")).str.replace(
+        r"(\+\d{2})(\d{2})$", r"\1:\2", regex=True)
+
+
+def export_hourly(out: dict) -> str:
+    """Grid signal and EV load per strategy for each hour of the day window (CSV)."""
+    w, loads = out["window"], out["loads"]
+    df = pd.DataFrame({"hour_start_local": _iso(w.index).to_numpy(),
+                       "demand_system_mw": w["demand_system_mw"].to_numpy(),
+                       "solar_available_mw": w["solar_mw"].to_numpy(), "wind_mw": w["wind_mw"].to_numpy(),
+                       "net_load_mw": w["net_load_mw"].to_numpy(), "nlmin_mw": w["nlmin_mw"].to_numpy(),
+                       "curtailment_risk_mw": w["curtailment_risk_mw"].to_numpy()})
+    for s in loads.columns:
+        df[f"ev_load_mw_{s}"] = loads[s].reindex(w.index, fill_value=0.0).to_numpy()
+    return df.round(4).to_csv(index=False)
+
+
+def export_sessions(detail: dict) -> str:
+    """One row per charging session with its outcome under each strategy (CSV)."""
+    prob, P = detail["prob"], detail["P"]
+    s0 = prob.sessions
+    df = pd.DataFrame({"session_id": s0["session_id"].to_numpy(), "station_id": prob.station,
+                       "arrival_local": _iso(s0["arrival_local"]).to_numpy(),
+                       "departure_local": _iso(s0["departure_local"]).to_numpy(),
+                       "energy_request_kwh": prob.energy, "max_power_kw": prob.pmax,
+                       "declares_departure": prob.declared})
+    for s in DETAIL_STRATEGIES:
+        o = sch.session_outcomes(prob, P[s])
+        df[f"delivered_kwh_{s}"] = o["delivered_kwh"].to_numpy()
+        df[f"finish_local_{s}"] = _iso([_finish(prob, P[s][i]) for i in range(len(df))]).to_numpy()
+        df[f"delay_min_{s}"] = o["delay_min"].to_numpy()
+    return df.round(4).to_csv(index=False)
+
+
+def export_schedule(detail: dict, strategy: str = "curtailment_aware") -> str:
+    """Every non-zero 15-minute charging instruction of one strategy (long CSV)."""
+    prob, P = detail["prob"], detail["P"][strategy]
+    i, t = np.nonzero(P > 1e-6)
+    df = pd.DataFrame({"session_id": prob.sessions["session_id"].to_numpy()[i], "station_id": prob.station[i],
+                       "interval_start_local": _iso(prob.slots[t]).to_numpy(),
+                       "power_kw": P[i, t], "energy_kwh": P[i, t] * sch.STEP_HOURS})
+    return df.round(4).to_csv(index=False)
+
+
+def export_summary(day: pd.Timestamp, settings: Settings, out: dict, verdict_: dict, cfg: dict) -> str:
+    """The day's settings, verdict and metrics (JSON), so every file can be traced."""
+    m = out["metrics"].astype(float).round(4)
+    payload = {
+        "schema": "grid-pulse-ev/component3/day-result/v1",
+        "day": day.strftime("%Y-%m-%d"), "weather_year": 2024,
+        "settings": {"scenario_year": settings.scenario_year, "nlmin_mw": settings.nlmin_mw,
+                     "snsp_max": settings.snsp_max, "sessions_per_day": settings.sessions_per_day,
+                     "declared_departure_fraction": settings.declared_departure_fraction,
+                     "weights": settings.weights,
+                     "station_capacity_kw": cfg["central"]["station_capacity_kw"]},
+        "session_source": cfg["sessions"]["source"],
+        "experiment_sessions": bool(out.get("experiment_sessions")),
+        "verdict": {k: verdict_[k] for k in ("grid", "clean", "peak", "drivers")},
+        "metrics": {s: {k: (None if pd.isna(v) else v) for k, v in row.items()} for s, row in m.iterrows()},
+        "note": "Curtailment risk is inferred from published grid limits, not measured.",
+    }
+    return json.dumps(payload, indent=2, default=str)
 
 
 def metrics_for_display(metrics: pd.DataFrame) -> pd.DataFrame:
