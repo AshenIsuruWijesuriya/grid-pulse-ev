@@ -221,7 +221,7 @@ with st.sidebar:
         st.subheader("Objective weights")
         w_peak = st.select_slider("Peak weight", [0.0, 0.25, 1.0, 4.0, 16.0], value=central.weights["peak"])
         w_delay = st.select_slider("Delay weight", [0.0, 0.01, 0.1], value=central.weights["delay"])
-        st.form_submit_button("Apply", type="primary", use_container_width=True)
+        st.form_submit_button("Apply", type="primary", width="stretch")
     settings = dd.Settings(year, float(nlmin), snsp_opts[snsp_label], int(n_sessions), float(declared),
                            {"curtailment": 1.0, "peak": float(w_peak), "delay": float(w_delay)})
     st.caption("Defaults are the central case of config/scenarios.json.")
@@ -264,9 +264,9 @@ with tab_day:
                   delta_color="off")
         k4.metric("Mean driver delay", f"{float(ca['mean_delay_min']):.0f} min",
                   f"solar-following {float(sf['mean_delay_min']):.0f} min", delta_color="off")
-        st.altair_chart(_style(grid_chart(out["window"])), use_container_width=True)
-        st.altair_chart(_style(ev_chart(out["window"], out["loads"])), use_container_width=True)
-        st.dataframe(dd.metrics_for_display(m), use_container_width=True)
+        st.altair_chart(_style(grid_chart(out["window"])), width="stretch")
+        st.altair_chart(_style(ev_chart(out["window"], out["loads"])), width="stretch")
+        st.dataframe(dd.metrics_for_display(m), width="stretch")
         same = ("the same sessions as the saved experiment" if out["experiment_sessions"]
                 else "a session draw for this day only (not part of the saved experiment)")
         st.caption(f"{out['sessions']:,} sessions, {same}. Every schedule passes the independent "
@@ -284,15 +284,15 @@ with tab_res:
         cols = list(dd.METRIC_COLUMNS)
         st.subheader(f"Every curtailment-risk day ({len(summ.get('risk_days', []))} days)")
         st.dataframe(dd.metrics_for_display(r["risk_days"].set_index("strategy")[cols]),
-                     use_container_width=True)
+                     width="stretch")
         if not r["by_day"].empty:
             st.caption("Absorbed risk energy (MWh) per day")
-            st.dataframe(r["by_day"].rename(columns=rx.LABELS).set_index("day"), use_container_width=True)
+            st.dataframe(r["by_day"].rename(columns=rx.LABELS).set_index("day"), width="stretch")
         st.subheader(f"Year-representative weekly sample ({len(summ.get('central_days', []))} days)")
         st.dataframe(dd.metrics_for_display(r["weekly"].set_index("strategy")[cols]),
-                     use_container_width=True)
+                     width="stretch")
         if not r["tradeoff"].empty:
-            st.altair_chart(_style(tradeoff_chart(r["tradeoff"])), use_container_width=True)
+            st.altair_chart(_style(tradeoff_chart(r["tradeoff"])), width="stretch")
         if not r["sensitivity"].empty:
             st.subheader("Sensitivity (SO6)")
             s = r["sensitivity"]
@@ -304,11 +304,11 @@ with tab_res:
                               ("days", "Days")):
                 if col in flags:
                     piv[name] = flags[col]
-            st.dataframe(piv, use_container_width=True)
+            st.dataframe(piv, width="stretch")
             st.caption("Absorbed risk energy (MWh) on the weekly sample.")
         if not r["scaling"].empty:
             st.subheader("Solver scaling (NFR1, NFR2)")
-            st.dataframe(r["scaling"], use_container_width=True, hide_index=True)
+            st.dataframe(r["scaling"], width="stretch", hide_index=True)
 
 # ---- Scenario years --------------------------------------------------------
 with tab_years:
@@ -316,16 +316,16 @@ with tab_years:
     if yrs.empty:
         st.info("Run scripts/build_grid_scenario.py first.")
     else:
-        st.altair_chart(_style(years_chart(yrs)), use_container_width=True)
+        st.altair_chart(_style(years_chart(yrs)), width="stretch")
         st.dataframe(yrs[["scenario_year", "solar_multiplier", "wind_multiplier", "demand_multiplier",
                           "must_take_multiplier", "risk_hours", "risk_energy_gwh", "days_with_risk",
-                          "snsp_binding_hours"]], use_container_width=True, hide_index=True)
+                          "snsp_binding_hours"]], width="stretch", hide_index=True)
         st.caption("Multipliers from the CEB Long Term Generation Expansion Plan 2025-2044 base case: "
                    "installed capacity (Table 2.1), planned additions (Table E3), demand forecast (Table 3.3).")
 
 # ---- Assumptions -----------------------------------------------------------
 with tab_assume:
-    st.dataframe(dd.assumptions(cfg), use_container_width=True, hide_index=True)
+    st.dataframe(dd.assumptions(cfg), width="stretch", hide_index=True)
     st.markdown(
         "**Method in one paragraph.** PUCSL 15-minute dispatch is corrected to the full system with "
         "CEB monthly totals; available solar is modelled from NASA POWER irradiance. Residual load "
