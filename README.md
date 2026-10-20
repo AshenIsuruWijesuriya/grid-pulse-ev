@@ -31,7 +31,7 @@ py -3 -m venv .venv
 
 If `py -3` is not found, try `python -m venv .venv`. You **do not have to activate** the virtual environment, because the commands above invoke its Python directly.
 
-Expected test result: `146 passed` (the exact run time can vary).
+Expected test result: `150 passed` (the exact run time can vary).
 
 ## Optional: download a pilot NASA POWER solar/weather dataset
 
@@ -69,6 +69,23 @@ Run from the project root once the PUCSL 2024 data are preprocessed and the NASA
 - `schedule_ev_charging.py`: uncontrolled, solar-following and curtailment-aware strategies, plus the constraint audit (SO4).
 - `run_experiments.py`: comparison on a weekly sample and on every risk day, weight trade-off, sensitivity, and forecast-based planning (SO5/SO6). `--workers` solves days in parallel. Outputs go to `results/experiments/`.
 - `benchmark_scaling.py`: solve time from 1,000 to 30,000 sessions on one day (NFR1, NFR2).
+
+### Dashboard (WBS 5.11, FR13)
+
+```powershell
+.\.venv\Scripts\streamlit.exe run app\dashboard.py
+```
+
+Opens at http://localhost:8501 (this computer only; see `.streamlit/config.toml`).
+
+- **Schedule a day:** pick any usable 2024 day and change the scenario year, NLmin, SNSP limit, sessions per day, declared-departure share or weights. The scheduler runs live and shows:
+  - residual load against NLmin, with the risk hours marked;
+  - the EV load of each strategy on common axes;
+  - the metrics table.
+
+  With the default settings, a day from the experiment uses exactly the experiment's sessions, so it reproduces the saved results.
+- **Experiment results**, **Scenario years** and **Assumptions** show the saved SO5/SO6 results, the LTGEP scenario years, and every parameter with its source.
+- The page logic is in `scripts/dashboard_data.py`, which is tested. It calls the same functions as the experiments.
 
 Every assumed parameter is in `config/scenarios.json`. Values tagged `provisional` must be replaced or approved before results are reported.
 

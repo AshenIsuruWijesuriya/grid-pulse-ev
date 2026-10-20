@@ -431,3 +431,49 @@ experiment set with corrected sweeps.
 - Send Appendix C to CEB for review.
 - Download the ACN-Data sessions and the PUCSL April–December 2025 workbooks.
 - Obtain fleet volumes per scenario year from Component 1.
+
+## 2026-10-20 — Interactive scheduling dashboard (WBS 5.11, FR13)
+
+**Activity:** Built the dashboard view required by FR13 as a Streamlit app
+(`app/dashboard.py`). Its data layer (`scripts/dashboard_data.py`) calls the
+same functions as the experiments.
+
+**What it shows:**
+- *Schedule a day:* any of the 206 usable 2024 days, with adjustable:
+  - scenario year;
+  - NLmin (240–780 MW);
+  - SNSP limit;
+  - sessions per day;
+  - declared-departure share;
+  - objective weights.
+
+  The LP runs live. The view shows residual load against NLmin with the risk
+  hours marked, the EV load of each strategy on common axes, KPI tiles and the
+  full metrics table. Infeasible days are reported, not relaxed.
+- *Experiment results:* the saved risk-day and weekly-sample comparisons, the
+  per-day absorption table, the trade-off chart, the sensitivity table
+  (including "never outranked") and the scaling benchmark.
+- *Scenario years:* LTGEP risk by year.
+- *Assumptions:* every parameter with its source (NFR6).
+
+**Reproducibility fix:**
+- Session draws depend on which days are drawn together.
+- The experiment's day sets are now built by one function,
+  `run_experiments.experiment_days`, which the dashboard reuses.
+- With default settings, the dashboard therefore reproduces the saved
+  experiment exactly. Example: 9 June 2024, curtailment-aware absorbed
+  68.11 MWh in both.
+
+**Validation:**
+- The page runs headless under Streamlit `AppTest` with no exceptions and all
+  four charts rendered.
+- Charts were rendered to PNG and inspected.
+- The live server answers the health check and listens on 127.0.0.1 only.
+- Tests: 150 passed (4 new for the data layer).
+
+**Limitations:**
+- One day with 10,000 sessions and four strategies takes about 6 s to solve;
+  results are cached.
+- Still not done:
+  - group-wide export scheme (FR12);
+  - expert usability review (NFR5, WBS 5.12).

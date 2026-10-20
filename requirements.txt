@@ -10,3 +10,4 @@ highspy>=1.7,<2
 scipy>=1.11,<2
 scikit-learn>=1.4,<2
 holidays>=0.50,<1
+streamlit>=1.40,<2
