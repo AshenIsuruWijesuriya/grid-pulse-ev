@@ -2,5 +2,10 @@
 base = "light"
 primaryColor = "#2a78d6"
 
+[server]
+# Serve on this computer only. To demo from another device on the same network,
+# start with: streamlit run app\dashboard.py --server.address 0.0.0.0
+address = "localhost"
+
 [browser]
 gatherUsageStats = false
