@@ -58,10 +58,20 @@ def days_for(settings: dd.Settings) -> pd.DataFrame:
     return dd.day_table(dd.signal(base, settings.apply(config())), days)
 
 
+@st.cache_resource(show_spinner="Drawing the experiment's session set...")
+def pool(sessions_per_day: int, declared: float) -> pd.DataFrame:
+    """Depends only on the session settings, so grid changes do not redraw it."""
+    base, _ = inputs()
+    s = dd.Settings.central(config())
+    s = dd.Settings(s.scenario_year, s.nlmin_mw, s.snsp_max, sessions_per_day, declared, s.weights)
+    return dd.session_pool(base, config(), s)
+
+
 @st.cache_data(show_spinner=False)
 def solve(day_iso: str, settings: dd.Settings) -> dict:
     base, _ = inputs()
-    return dd.solve_one_day(pd.Timestamp(day_iso, tz=dd.TZ), base, config(), settings)
+    p = pool(settings.sessions_per_day, settings.declared_departure_fraction)
+    return dd.solve_one_day(pd.Timestamp(day_iso, tz=dd.TZ), base, config(), settings, pool=p)
 
 
 @st.cache_data(show_spinner=False)
@@ -257,8 +267,10 @@ with tab_day:
         st.altair_chart(_style(grid_chart(out["window"])), use_container_width=True)
         st.altair_chart(_style(ev_chart(out["window"], out["loads"])), use_container_width=True)
         st.dataframe(dd.metrics_for_display(m), use_container_width=True)
-        st.caption(f"{out['sessions']:,} sessions; every schedule passes the independent constraint "
-                   "audit (Violations column). Evening = 17:00-23:59.")
+        same = ("the same sessions as the saved experiment" if out["experiment_sessions"]
+                else "a session draw for this day only (not part of the saved experiment)")
+        st.caption(f"{out['sessions']:,} sessions, {same}. Every schedule passes the independent "
+                   "constraint audit (Violations column). Evening = 17:00-23:59.")
 
 # ---- Experiment results ----------------------------------------------------
 with tab_res:
