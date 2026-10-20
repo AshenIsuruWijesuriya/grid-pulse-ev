@@ -31,7 +31,6 @@ import run_experiments as rx  # noqa: E402
 INK, INK_2, GRID_C, RISK = "#0b0b0b", "#52514e", "#e4e3df", "#e34948"
 ORDER = ["uncontrolled", "solar_following", "curtailment_aware", "curtailment_aware_persistence",
          "curtailment_aware_ml"]
-COLOR_SCALE = alt.Scale(domain=[rx.LABELS[s] for s in ORDER], range=[rx.COLORS[s] for s in ORDER])
 DISCLAIMER = ("C(t) is an inferred curtailment-risk signal from cited grid limits, not measured "
               "curtailment. EV sessions and fleet size are provisional placeholders.")
 
