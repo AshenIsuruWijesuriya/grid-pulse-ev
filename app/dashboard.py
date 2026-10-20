@@ -104,10 +104,15 @@ def risk_bands(window: pd.DataFrame) -> alt.Chart:
 def grid_chart(window: pd.DataFrame) -> alt.Chart:
     df = window.copy()
     df["hour"] = _wallclock(df.index).shift(30, freq="min")       # plot at mid-hour
-    df["risk_low"] = df[["net_load_mw", "nlmin_mw"]].min(axis=1)
     x = alt.X("hour:T", title=None, axis=alt.Axis(format="%H:%M", tickCount=10))
-    area = alt.Chart(df).mark_area(color=RISK, opacity=0.30, interpolate="linear").encode(
-        x=x, y="risk_low:Q", y2="nlmin_mw:Q")
+    # Risk is an hourly quantity: one block per risk hour, from NL up to NLmin,
+    # aligned with the hour bands (a line-interpolated area would bleed past them).
+    r = window[window["curtailment_risk_mw"] > 0]
+    blocks = pd.DataFrame({"start": _wallclock(r.index), "end": _wallclock(r.index).shift(1, freq="h"),
+                           "low": r[["net_load_mw", "nlmin_mw"]].min(axis=1).to_numpy(),
+                           "nlmin": r["nlmin_mw"].to_numpy()})
+    area = alt.Chart(blocks).mark_rect(color=RISK, opacity=0.30).encode(
+        x="start:T", x2="end:T", y="low:Q", y2="nlmin:Q")
     nl = alt.Chart(df).mark_line(color=INK, strokeWidth=2).encode(
         x=x, y=alt.Y("net_load_mw:Q", title="MW"))
     floor = alt.Chart(df).mark_line(color=INK_2, strokeWidth=1.5, strokeDash=[5, 4]).encode(
@@ -133,7 +138,10 @@ def grid_chart(window: pd.DataFrame) -> alt.Chart:
 def ev_chart(window: pd.DataFrame, loads: pd.DataFrame) -> alt.Chart:
     df = dd.long_loads(loads.set_axis(_wallclock(loads.index).shift(30, freq="min")))
     x = alt.X("hour:T", title=None, axis=alt.Axis(format="%H:%M", tickCount=10))
-    color = alt.Color("label:N", scale=COLOR_SCALE, title=None)
+    # Legend lists only the strategies drawn; each keeps its fixed color.
+    drawn = [s for s in ORDER if s in loads.columns]
+    color = alt.Color("label:N", title=None, scale=alt.Scale(
+        domain=[rx.LABELS[s] for s in drawn], range=[rx.COLORS[s] for s in drawn]))
     dash = alt.StrokeDash("is_forecast:N", legend=None,
                           scale=alt.Scale(domain=[False, True], range=[[1, 0], [6, 4]]))
     df["is_forecast"] = df["strategy"].str.endswith(rx.FORECAST_SUFFIXES)
@@ -172,7 +180,7 @@ def tradeoff_chart(tr: pd.DataFrame) -> alt.Chart:
         alt.Tooltip("mean_delay_min:Q", format=".1f", title="Mean delay (min)")])
     lo, hi = df["absorbed_mwh"].min(), df["absorbed_mwh"].max()
     sub = (f"Absorbed risk energy is {lo:.1f} MWh at every setting" if hi - lo < 0.05
-           else f"Absorbed risk energy {lo:.1f}-{hi:.1f} MWh")
+           else f"Absorbed risk energy {lo:.1f}-{hi:.1f} MWh") + "; lines overlap where settings give the same result"
     return (lines + pts).properties(height=300, title=alt.TitleParams(
         "Peak reduction against driver delay (peak weight 0-16)", anchor="start", color=INK,
         fontSize=13, subtitle=sub, subtitleColor=INK_2))
