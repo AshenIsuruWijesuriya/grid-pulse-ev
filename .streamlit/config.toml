@@ -1,10 +1,22 @@
 [theme]
 base = "light"
-primaryColor = "#2a78d6"
+# Green: the "smart charging / clean power" colour used across the app (white text passes 4.5:1).
+primaryColor = "#0f7d55"
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f3f6f4"
+textColor = "#0b0b0b"
+borderColor = "#e2e5e1"
+baseRadius = "0.75rem"
+buttonRadius = "0.6rem"
+headingFontWeights = [700, 650, 600, 600, 600, 600]
+metricValueFontWeight = 700
+linkUnderline = false
+paddingTop = "1.5rem"
+paddingBottom = "3rem"
 
 [server]
 # Serve on this computer only. To demo from another device on the same network,
-# start with: streamlit run app\dashboard.py --server.address 0.0.0.0
+# start with: streamlit run app\streamlit_app.py --server.address 0.0.0.0
 address = "localhost"
 
 [browser]
