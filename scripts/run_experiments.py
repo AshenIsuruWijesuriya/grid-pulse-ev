@@ -26,7 +26,8 @@ Days
 
 Usage
     .venv\\Scripts\\python.exe scripts\\run_experiments.py --workers 4   (full)
-    .venv\\Scripts\\python.exe scripts\\run_experiments.py --quick    (4 days, smoke test)
+    .venv\\Scripts\\python.exe scripts\\run_experiments.py --quick    (4 days, smoke test;
+                                                                     writes results/experiments_quick)
 Outputs go to results/experiments/. Every figure is a provisional-scenario
 result until NLmin, SNSP, fleet volume and session data are replaced.
 """
@@ -399,7 +400,8 @@ def main() -> None:
     ap.add_argument("--skip-sweeps", action="store_true")
     ap.add_argument("--workers", type=int, default=1,
                     help="worker processes that solve days in parallel")
-    ap.add_argument("--outdir", type=Path, default=PROJECT_ROOT / "results/experiments")
+    ap.add_argument("--outdir", type=Path, default=None,
+                    help="default results/experiments, or results/experiments_quick with --quick")
     args = ap.parse_args()
 
     t_start = time.perf_counter()
@@ -410,7 +412,8 @@ def main() -> None:
     ed = experiment_days(base, cfg, args.quick)
     days_all, central_days, risk_days = ed["schedulable"], ed["central"], ed["risk"]
     sweep_days, all_days = ed["sweep"], ed["all"]
-    out = args.outdir
+    # A smoke test must never overwrite the full results the app and documents read.
+    out = args.outdir or PROJECT_ROOT / ("results/experiments_quick" if args.quick else "results/experiments")
     (out / "figures").mkdir(parents=True, exist_ok=True)
 
     gmm = None
