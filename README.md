@@ -57,7 +57,7 @@ Run from the project root once the PUCSL 2024 data are preprocessed and the NASA
 .\.venv\Scripts\python.exe scripts\build_grid_scenario.py
 .\.venv\Scripts\python.exe scripts\derive_nlmin.py
 .\.venv\Scripts\python.exe scripts\forecast_grid.py
-.\.venv\Scripts\python.exe scripts\run_experiments.py --quick --workers 4   # smoke test
+.\.venv\Scripts\python.exe scripts\run_experiments.py --quick --skip-sweeps --workers 4   # smoke test, ~25 s, writes results\experiments_quick
 .\.venv\Scripts\python.exe scripts\run_experiments.py --workers 6           # full run
 .\.venv\Scripts\python.exe scripts\benchmark_scaling.py                     # NFR1/NFR2 runtime
 ```
