@@ -224,7 +224,8 @@ def predict(name: str, X: pd.DataFrame, y: pd.Series, train: pd.Series,
     model = make_model(name).fit(X.loc[fit_rows, cols], y[fit_rows])
     out = pd.Series(np.nan, index=X.index[test])
     rows = test & has_nwp
-    out[X.index[rows]] = model.predict(X.loc[rows, cols])
+    if rows.any():
+        out[X.index[rows]] = model.predict(X.loc[rows, cols])
     return out
 
 
