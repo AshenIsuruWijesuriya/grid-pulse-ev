@@ -11,6 +11,12 @@
       "hambantota": "data/processed/solar/nasa_power_hambantota_20231231_20250101_utc.csv",
       "jaffna":     "data/processed/solar/nasa_power_jaffna_20231231_20250101_utc.csv"
     },
+    "nwp_sites": {
+      "colombo":    "data/processed/weather_forecast/openmeteo_gfs_seamless_colombo_20231231_20250101_utc.csv",
+      "hambantota": "data/processed/weather_forecast/openmeteo_gfs_seamless_hambantota_20231231_20250101_utc.csv",
+      "jaffna":     "data/processed/weather_forecast/openmeteo_gfs_seamless_jaffna_20231231_20250101_utc.csv"
+    },
+    "nwp_lead_days": 1,
     "must_take_columns": ["mini_hydro_mw", "biomass_mw"],
     "peak_band_fraction": 0.03,
     "evening_hours": [17, 23]
