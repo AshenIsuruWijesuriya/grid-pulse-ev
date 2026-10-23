@@ -487,7 +487,52 @@ def experiment_results() -> dict:
     p = PROJECT_ROOT / "results/grid_scenario/grid_base_2024_diagnostics.json"
     out["scenario_years"] = (pd.DataFrame(json.loads(p.read_text(encoding="utf-8"))["scenario_years"])
                              if p.is_file() else pd.DataFrame())
+    f_dir = PROJECT_ROOT / "results/forecast"
+    p = f_dir / "forecast_holdout_accuracy.csv"
+    out["forecast_accuracy"] = pd.read_csv(p) if p.is_file() else pd.DataFrame()
+    p = f_dir / "forecast_summary.json"
+    out["forecast_summary"] = json.loads(p.read_text(encoding="utf-8")) if p.is_file() else {}
+    p = f_dir / "forecast_holdout_predictions.csv"
+    if p.is_file():
+        h = pd.read_csv(p)
+        h.index = pd.to_datetime(h.pop("hour_start_local"), utc=True).dt.tz_convert(TZ)
+        out["forecast_holdout"] = h
+    else:
+        out["forecast_holdout"] = pd.DataFrame()
     return out
+
+
+# Plain names for the forecast targets and models (Evidence page).
+FORECAST_TARGETS = {"demand_system_mw": "Demand", "solar_available_mw": "Solar",
+                    "wind_mw": "Wind", "must_take_mw": "Small hydro and biomass"}
+FORECAST_MODELS = {"persistence": "Tomorrow = today", "seasonal_naive": "Same day last week",
+                   "ridge": "Ridge regression", "gbm": "Gradient boosting"}
+
+
+def forecast_table(accuracy: pd.DataFrame, selected: dict) -> pd.DataFrame:
+    """Hold-out MAE (MW) of every model per target, the chosen model and its skill."""
+    mae = accuracy.pivot(index="target", columns="model", values="mae")
+    rows = []
+    for t, name in FORECAST_TARGETS.items():
+        if t not in mae.index:
+            continue
+        chosen = selected.get(t, "persistence")
+        row = {"Forecast of": name}
+        row.update({FORECAST_MODELS[m]: mae.loc[t, m] for m in FORECAST_MODELS if m in mae.columns})
+        row["Chosen"] = FORECAST_MODELS[chosen]
+        row["Better than tomorrow = today"] = 1 - mae.loc[t, chosen] / mae.loc[t, "persistence"]
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def forecast_skill_same_hours(holdout: pd.DataFrame, target: str) -> dict:
+    """MAE of the chosen model and of persistence on the hours where both exist."""
+    h = holdout[holdout["target"] == target].dropna(subset=["actual_mw", "forecast_mw", "persistence_mw"])
+    mae = float((h["forecast_mw"] - h["actual_mw"]).abs().mean())
+    ref = float((h["persistence_mw"] - h["actual_mw"]).abs().mean())
+    mape = float(((h["forecast_mw"] - h["actual_mw"]).abs() / h["actual_mw"]).mean() * 100)
+    return {"hours": len(h), "mae_mw": mae, "persistence_mae_mw": ref, "skill": 1 - mae / ref,
+            "mape_pct": mape}
 
 
 def assumptions(cfg: dict) -> pd.DataFrame:

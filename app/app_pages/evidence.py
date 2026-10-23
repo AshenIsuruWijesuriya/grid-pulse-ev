@@ -69,6 +69,60 @@ st.markdown("The study was repeated with a lower and higher safe minimum for the
 if not r["tradeoff"].empty:
     st.altair_chart(shared.style(shared.tradeoff_chart(r["tradeoff"])))
 
+fa, fs, fh = (r.get(k, empty) for k, empty in (("forecast_accuracy", pd.DataFrame()), ("forecast_summary", {}),
+                                                ("forecast_holdout", pd.DataFrame())))
+if not fa.empty and fs:
+    st.subheader("4. How accurate is the forecast?", icon=":material/query_stats:")
+    st.markdown("In real life the scheduler plans at midnight for the next day, so it only has a "
+                "**forecast** of the grid. The models were trained on **January–September 2024** and tested "
+                "on **October–December 2024**, months they never saw. A model is used only if it beats the "
+                "simple rule *tomorrow = today*.")
+    table = dd.forecast_table(fa, fs.get("selected_model_per_target", {}))
+    acc = fa.set_index(["target", "model"])
+    chosen = fs.get("selected_model_per_target", {}).get("demand_system_mw", "gbm")
+    demand = acc.loc[("demand_system_mw", chosen)]
+    ref = acc.loc[("demand_system_mw", "persistence")]
+    det = fs.get("holdout_curtailment_risk_detection", {}).get("selected_per_target", {})
+    with st.container(horizontal=True):
+        st.metric("Average error of the demand forecast", f"{demand['mape_pct']:.1f}%",
+                  f"{demand['mae']:.0f} MW, against {ref['mae']:.0f} MW for tomorrow = today",
+                  delta_color="off", border=True)
+        st.metric("Better than tomorrow = today", f"{demand['skill_vs_persistence'] * 100:.0f}%",
+                  f"demand, {dd.FORECAST_MODELS[chosen].lower()}", delta_color="off", border=True)
+        if det:
+            st.metric("Waste warnings that were right", f"{int(det['precision'] * 100 + 0.5)}%",
+                      f"and it finds {det['recall'] * 100:.0f}% of the waste hours", delta_color="off", border=True)
+        if "curtailment_aware_ml" in risk.index:
+            st.metric("Evening peak removed when planning on the forecast",
+                      f"{risk.loc['curtailment_aware_ml', 'evening_peak_reduction_pct_of_ev_increase']:.1f}%",
+                      f"{risk.loc['curtailment_aware', 'evening_peak_reduction_pct_of_ev_increase']:.0f}% "
+                      "with perfect knowledge", delta_color="off", border=True)
+    if not fh.empty:
+        names = {v: k for k, v in dd.FORECAST_TARGETS.items()}
+        weeks = pd.date_range("2024-10-07", "2024-12-23", freq="7D", tz=dd.TZ)
+        with st.container(horizontal=True, vertical_alignment="bottom"):
+            pick = st.segmented_control("Forecast of", list(names), default="Demand", key="ev_ftarget")
+            week = st.select_slider("Week", weeks, value=pd.Timestamp("2024-10-28", tz=dd.TZ), key="ev_fweek",
+                                    format_func=lambda d: f"{d:%d %b} – {d + pd.offsets.Day(6):%d %b}")
+        st.altair_chart(shared.style(shared.forecast_chart(fh, names[pick or "Demand"], week)))
+        st.caption("Black: what actually happened. Pink: the forecast made at midnight by the chosen model. "
+                   "Dashed: tomorrow = today. The closer pink is to black, the better.")
+    st.dataframe(table, hide_index=True, alt="Forecast error of every model on October to December 2024",
+                 column_config={**{m: st.column_config.NumberColumn(f"{m} (MW)", format="%.0f")
+                                   for m in dd.FORECAST_MODELS.values()},
+                                "Better than tomorrow = today": st.column_config.NumberColumn(format="percent")})
+    notes = ["Errors are the average miss in MW per hour (MAE) on October–December 2024; lower is better."]
+    if not fh.empty:
+        same = dd.forecast_skill_same_hours(fh, "demand_system_mw")
+        notes.append(f"On exactly the hours both demand forecasts cover ({same['hours']:,}), the chosen model "
+                     f"is {same['skill'] * 100:.0f}% better than tomorrow = today.")
+    notes.append("For solar no model beat tomorrow = today, because clouds need a weather forecast: that is "
+                 "the next step.")
+    if det and det.get("actual_risk_mwh"):
+        notes.append(f"The forecast also under-estimates the wasted clean power by about "
+                     f"{(1 - det['forecast_risk_mwh'] / det['actual_risk_mwh']) * 100:.0f}%.")
+    st.caption(" ".join(notes))
+
 with st.expander("All result tables", icon=":material/table_chart:"):
     cols_ = list(dd.METRIC_COLUMNS)
     st.markdown("**Curtailment-risk days**")

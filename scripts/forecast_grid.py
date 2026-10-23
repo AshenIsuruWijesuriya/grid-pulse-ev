@@ -20,7 +20,8 @@ Models
 
 Validation
     1. Chronological hold-out: train Jan-Sep, test Oct-Dec. Accuracy (MAE,
-       RMSE, MAPE) and skill = 1 - MAE/MAE_persistence.
+       RMSE, MAPE) and skill = 1 - MAE/MAE_persistence. The hold-out
+       predictions are saved for plotting (forecast_holdout_predictions.csv).
     2. Decision quality on the hold-out: C(t) error and risk-hour
        precision/recall under the central scenario.
     3. Leave-one-month-out predictions for every hour of the year, so the
@@ -142,6 +143,13 @@ def forecast_base(base: pd.DataFrame, preds: dict) -> pd.DataFrame:
     return fb
 
 
+def holdout_table(actual: pd.Series, preds: dict, target: str, chosen: str) -> pd.DataFrame:
+    """Hold-out hours of one target: actual, the chosen model's forecast and persistence (MW)."""
+    p = preds[chosen][target]
+    return pd.DataFrame({"target": target, "model": chosen, "actual_mw": actual.reindex(p.index),
+                         "forecast_mw": p, "persistence_mw": preds["persistence"][target].reindex(p.index)})
+
+
 def risk_quality(actual: pd.DataFrame, fcst: pd.DataFrame, mask: pd.Series) -> dict:
     a = actual.loc[mask, "curtailment_risk_mw"]
     f = fcst.loc[mask, "curtailment_risk_mw"]
@@ -217,6 +225,9 @@ def main() -> None:
     out.to_csv(PROJECT_ROOT / "data/processed/grid" / f"grid_forecast_{year}_hourly.csv", index=False)
     rows = [{"target": t, "model": m, **v} for t, d in holdout.items() for m, v in d.items()]
     pd.DataFrame(rows).to_csv(args.outdir / "forecast_holdout_accuracy.csv", index=False)
+    hold = pd.concat([holdout_table(base[t], hold_preds, t, best[t]) for t in TARGETS])
+    hold.index = hold.index.strftime("%Y-%m-%dT%H:%M:%S%z")
+    hold.rename_axis("hour_start_local").to_csv(args.outdir / "forecast_holdout_predictions.csv")
     info = {
         "status": "Day-ahead forecast without NWP; central scenario parameters are provisional",
         "issue_time": "00:00 local, day-ahead",

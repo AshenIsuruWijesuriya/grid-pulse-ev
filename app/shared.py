@@ -379,6 +379,31 @@ def years_chart(yrs: pd.DataFrame) -> alt.Chart:
         "Before any new batteries. Lowest safe level 520 MW, inertia limit 75%."))
 
 
+def forecast_chart(holdout: pd.DataFrame, target: str, start: pd.Timestamp, days: int = 7) -> alt.Chart:
+    """Actual vs forecast for one week of the hold-out (months the models never saw)."""
+    h = holdout[(holdout["target"] == target) & (holdout.index >= start)
+                & (holdout.index < start + pd.offsets.Day(days))]
+    lines = {"Actual": "actual_mw", "Forecast (chosen model)": "forecast_mw",
+             "Tomorrow = today": "persistence_mw"}
+    wide = h[list(lines.values())].set_axis(list(lines), axis=1).set_axis(_wallclock(h.index)).rename_axis("hour")
+    df = wide.reset_index().melt("hour", var_name="series", value_name="mw")
+    x = alt.X("hour:T", title=None, axis=alt.Axis(format="%a %d %b", tickCount=days))
+    color = alt.Color("series:N", title=None, scale=alt.Scale(
+        domain=list(lines), range=[INK, rx.COLORS["curtailment_aware_ml"], rx.COLORS["curtailment_aware_persistence"]]))
+    dash = alt.StrokeDash("series:N", title=None, scale=alt.Scale(
+        domain=list(lines), range=[[1, 0], [1, 0], [5, 4]]))
+    chart = alt.Chart(df).mark_line(strokeWidth=2).encode(
+        x=x, y=alt.Y("mw:Q", title="MW", scale=alt.Scale(zero=False)), color=color, strokeDash=dash)
+    hover = alt.selection_point(fields=["hour"], nearest=True, on="pointerover", empty=False)
+    rule = alt.Chart(wide.reset_index()).mark_rule(color=INK_2).encode(
+        x=x, opacity=alt.condition(hover, alt.value(0.6), alt.value(0)),
+        tooltip=[alt.Tooltip("hour:T", format="%a %d %b %H:%M", title="Time")]
+        + [alt.Tooltip(f"{c}:Q", format=",.0f", title=f"{c} (MW)") for c in lines]).add_params(hover)
+    return (chart + rule).properties(height=300, title=_title(
+        "Forecast made at midnight vs what actually happened",
+        "A week from October–December 2024, months the model never saw while training."))
+
+
 def compare_bars(table: pd.DataFrame, col: str, title: str, fmt: str, sub: str) -> alt.Chart:
     """Horizontal bars, one per option; the axis names each bar, so no legend."""
     df = table[[col]].reset_index().rename(columns={"index": "strategy", "strategy": "strategy"})

@@ -80,7 +80,9 @@ def test_run_case_same_result_in_worker_pool():
     serial = rx.run_case(*args)
     with ThreadPoolExecutor(2) as pool:
         pooled = rx.run_case(*args, pool=pool)
-    assert json.dumps(serial["metrics"], default=str) == json.dumps(pooled["metrics"], default=str)
+    def results(r):                     # solve times vary run to run; compare the results only
+        return {s: {k: v for k, v in m.items() if not k.startswith("solver_s")} for s, m in r["metrics"].items()}
+    assert json.dumps(results(serial), default=str) == json.dumps(results(pooled), default=str)
     assert serial["metrics"]["curtailment_aware"]["constraint_violations"] == 0
 
 

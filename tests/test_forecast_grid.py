@@ -74,3 +74,14 @@ def test_forecast_solar_zero_in_dark_hours():
     fb = fg.forecast_base(b, {"solar_available_mw": p})
     assert (fb.loc[fb.index.hour == 2, "solar_available_mw"] == 0).all()
     assert (fb.loc[fb.index.hour == 12, "solar_available_mw"] == 30).all()
+
+
+def test_holdout_table_lines_up_actual_forecast_and_persistence():
+    idx = pd.date_range("2024-10-01", periods=3, freq="h", tz=TZ)
+    actual = pd.Series([100.0, 110.0, 120.0], index=idx)
+    preds = {"gbm": {"demand_system_mw": pd.Series([101.0, 109.0, 125.0], index=idx)},
+             "persistence": {"demand_system_mw": pd.Series([90.0, np.nan, 130.0], index=idx)}}
+    h = fg.holdout_table(actual, preds, "demand_system_mw", "gbm")
+    assert list(h.columns) == ["target", "model", "actual_mw", "forecast_mw", "persistence_mw"]
+    assert h["actual_mw"].tolist() == [100.0, 110.0, 120.0] and h["forecast_mw"].iloc[2] == 125.0
+    assert np.isnan(h["persistence_mw"].iloc[1]) and (h["model"] == "gbm").all()
