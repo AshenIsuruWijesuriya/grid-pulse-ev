@@ -75,13 +75,17 @@ if not fa.empty and fs:
     st.subheader("4. How accurate is the forecast?", icon=":material/query_stats:")
     st.markdown("In real life the scheduler plans at midnight for the next day, so it only has a "
                 "**forecast** of the grid. The models were trained on **January–September 2024** and tested "
-                "on **October–December 2024**, months they never saw. A model is used only if it beats the "
+                "on **October–December 2024**, months they never saw. Each model was chosen on "
+                "**July–September**, before the test months were looked at, and only if it beat the "
                 "simple rule *tomorrow = today*.")
-    table = dd.forecast_table(fa, fs.get("selected_model_per_target", {}))
+    selected = fs.get("selected_model_per_target", {})
+    table = dd.forecast_table(fa, selected)
     acc = fa.set_index(["target", "model"])
-    chosen = fs.get("selected_model_per_target", {}).get("demand_system_mw", "gbm")
+    chosen = selected.get("demand_system_mw", "gbm")
     demand = acc.loc[("demand_system_mw", chosen)]
     ref = acc.loc[("demand_system_mw", "persistence")]
+    solar_model = selected.get("solar_available_mw", "persistence")
+    solar, solar_ref = acc.loc[("solar_available_mw", solar_model)], acc.loc[("solar_available_mw", "persistence")]
     det = fs.get("holdout_curtailment_risk_detection", {}).get("selected_per_target", {})
     with st.container(horizontal=True):
         st.metric("Average error of the demand forecast", f"{demand['mape_pct']:.1f}%",
@@ -89,6 +93,10 @@ if not fa.empty and fs:
                   delta_color="off", border=True)
         st.metric("Better than tomorrow = today", f"{demand['skill_vs_persistence'] * 100:.0f}%",
                   f"demand, {dd.FORECAST_MODELS[chosen].lower()}", delta_color="off", border=True)
+        if solar_model.endswith("_nwp"):
+            st.metric("Solar forecast better than tomorrow = today", f"{solar['skill_vs_persistence'] * 100:.0f}%",
+                      f"{solar['mae']:.0f} MW against {solar_ref['mae']:.0f} MW, using a weather forecast",
+                      delta_color="off", border=True)
         if det:
             st.metric("Waste warnings that were right", f"{int(det['precision'] * 100 + 0.5)}%",
                       f"and it finds {det['recall'] * 100:.0f}% of the waste hours", delta_color="off", border=True)
@@ -111,13 +119,15 @@ if not fa.empty and fs:
                  column_config={**{m: st.column_config.NumberColumn(f"{m} (MW)", format="%.0f")
                                    for m in dd.FORECAST_MODELS.values()},
                                 "Better than tomorrow = today": st.column_config.NumberColumn(format="percent")})
-    notes = ["Errors are the average miss in MW per hour (MAE) on October–December 2024; lower is better."]
-    if not fh.empty:
-        same = dd.forecast_skill_same_hours(fh, "demand_system_mw")
-        notes.append(f"On exactly the hours both demand forecasts cover ({same['hours']:,}), the chosen model "
-                     f"is {same['skill'] * 100:.0f}% better than tomorrow = today.")
-    notes.append("For solar no model beat tomorrow = today, because clouds need a weather forecast: that is "
-                 "the next step.")
+    notes = ["Errors are the average miss in MW per hour (MAE) on October–December 2024, with every model "
+             "scored on the same hours; lower is better."]
+    nwp = fs.get("nwp") or {}
+    if solar_model.endswith("_nwp"):
+        source = "ECMWF" if "ecmwf" in nwp.get("source", "") else "GFS"
+        notes.append(f"The solar forecast uses the {source} weather forecast for three sites, taken only from "
+                     "forecast runs that were published before midnight.")
+    else:
+        notes.append("For solar no model beat tomorrow = today; clouds need a weather forecast.")
     if det and det.get("actual_risk_mwh"):
         notes.append(f"The forecast also under-estimates the wasted clean power by about "
                      f"{(1 - det['forecast_risk_mwh'] / det['actual_risk_mwh']) * 100:.0f}%.")

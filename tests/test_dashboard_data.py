@@ -176,18 +176,12 @@ def test_long_loads_and_assumptions_are_tidy():
     assert a["Value"].map(type).eq(str).all() and a["Source"].str.len().gt(0).all()
 
 
-def test_forecast_table_and_same_hours_skill():
-    acc = pd.DataFrame({"target": ["demand_system_mw"] * 2 + ["solar_available_mw"] * 2,
-                        "model": ["persistence", "gbm"] * 2, "mae": [100.0, 60.0, 20.0, 25.0]})
-    t = dd.forecast_table(acc, {"demand_system_mw": "gbm", "solar_available_mw": "persistence"})
+def test_forecast_table():
+    acc = pd.DataFrame({"target": ["demand_system_mw"] * 2 + ["solar_available_mw"] * 3,
+                        "model": ["persistence", "gbm", "persistence", "gbm", "ridge_nwp"],
+                        "mae": [100.0, 60.0, 20.0, 25.0, 16.0]})
+    t = dd.forecast_table(acc, {"demand_system_mw": "gbm", "solar_available_mw": "ridge_nwp"})
     assert t["Forecast of"].tolist() == ["Demand", "Solar"]
-    assert t["Chosen"].tolist() == ["Gradient boosting", "Tomorrow = today"]
-    assert t["Better than tomorrow = today"].tolist() == pytest.approx([0.4, 0.0])
-    idx = pd.date_range("2024-10-01", periods=3, freq="h", tz=TZ)
-    hold = pd.DataFrame({"target": "demand_system_mw", "actual_mw": [100.0, 200.0, 100.0],
-                         "forecast_mw": [110.0, 190.0, 100.0], "persistence_mw": [80.0, 240.0, np.nan]},
-                        index=idx)
-    s = dd.forecast_skill_same_hours(hold, "demand_system_mw")      # third hour has no persistence
-    assert s["hours"] == 2 and s["mae_mw"] == pytest.approx(10.0)
-    assert s["persistence_mae_mw"] == pytest.approx(30.0) and s["skill"] == pytest.approx(2 / 3)
-    assert s["mape_pct"] == pytest.approx((10 + 5) / 2)
+    assert t["Chosen"].tolist() == ["Gradient boosting", "Ridge + weather forecast"]
+    assert t["Better than tomorrow = today"].tolist() == pytest.approx([0.4, 0.2])
+    assert np.isnan(t["Ridge + weather forecast"].iloc[0])          # demand has no weather model

@@ -56,6 +56,10 @@ Run from the project root once the PUCSL 2024 data are preprocessed and the NASA
 .\.venv\Scripts\python.exe scripts\build_hourly_net_demand.py --input data\processed\grid\pucsl_2024_consolidated_dispatch_15min.csv --year 2024
 .\.venv\Scripts\python.exe scripts\build_grid_scenario.py
 .\.venv\Scripts\python.exe scripts\derive_nlmin.py
+# archived day-ahead weather forecasts for the solar forecast (once, needs internet; repeat with --model gfs_seamless)
+.\.venv\Scripts\python.exe scripts\download_nwp_forecast.py --model ecmwf_ifs025 --name colombo --lat 6.9271 --lon 79.8612
+.\.venv\Scripts\python.exe scripts\download_nwp_forecast.py --model ecmwf_ifs025 --name hambantota --lat 6.1241 --lon 81.1185
+.\.venv\Scripts\python.exe scripts\download_nwp_forecast.py --model ecmwf_ifs025 --name jaffna --lat 9.6615 --lon 80.0255
 .\.venv\Scripts\python.exe scripts\forecast_grid.py
 .\.venv\Scripts\python.exe scripts\run_experiments.py --quick --skip-sweeps --workers 4   # smoke test, ~25 s, writes results\experiments_quick
 .\.venv\Scripts\python.exe scripts\run_experiments.py --workers 6           # full run
@@ -64,7 +68,8 @@ Run from the project root once the PUCSL 2024 data are preprocessed and the NASA
 
 - `build_grid_scenario.py`: boundary-corrected demand, modelled available solar, the inferred curtailment-risk signal C(t), and the LTGEP scenario years 2025–2030 (SO1/SO2).
 - `derive_nlmin.py`: NLmin from the cited coal minimum and the commitment observed in the 2024 stressed hours, with reserve and single-unit checks (SO2, Appendix C).
-- `forecast_grid.py`: day-ahead demand, solar, wind and must-take forecasts, kept only where they beat persistence.
+- `download_nwp_forecast.py`: archived irradiance forecasts (Open-Meteo Previous Runs API) made at least 24 h and 48 h ahead. These are forecasts, not measurements.
+- `forecast_grid.py`: day-ahead demand, solar, wind and must-take forecasts. Each model is chosen on July–September and kept only where it beats persistence; Oct–Dec is the untouched test. Solar uses the ECMWF forecast, taken only from runs published before midnight.
 - `ev_sessions.py`: session sets, parametric now and a GMM fitted to ACN-Data with `--acn-json` (SO3).
 - `schedule_ev_charging.py`: uncontrolled, solar-following and curtailment-aware strategies, plus the constraint audit (SO4).
 - `run_experiments.py`: comparison on a weekly sample and on every risk day, weight trade-off, sensitivity, and forecast-based planning (SO5/SO6). `--workers` solves days in parallel. Outputs go to `results/experiments/`.

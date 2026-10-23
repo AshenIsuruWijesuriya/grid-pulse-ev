@@ -506,7 +506,8 @@ def experiment_results() -> dict:
 FORECAST_TARGETS = {"demand_system_mw": "Demand", "solar_available_mw": "Solar",
                     "wind_mw": "Wind", "must_take_mw": "Small hydro and biomass"}
 FORECAST_MODELS = {"persistence": "Tomorrow = today", "seasonal_naive": "Same day last week",
-                   "ridge": "Ridge regression", "gbm": "Gradient boosting"}
+                   "ridge": "Ridge regression", "gbm": "Gradient boosting",
+                   "ridge_nwp": "Ridge + weather forecast", "gbm_nwp": "Gradient boosting + weather forecast"}
 
 
 def forecast_table(accuracy: pd.DataFrame, selected: dict) -> pd.DataFrame:
@@ -523,16 +524,6 @@ def forecast_table(accuracy: pd.DataFrame, selected: dict) -> pd.DataFrame:
         row["Better than tomorrow = today"] = 1 - mae.loc[t, chosen] / mae.loc[t, "persistence"]
         rows.append(row)
     return pd.DataFrame(rows)
-
-
-def forecast_skill_same_hours(holdout: pd.DataFrame, target: str) -> dict:
-    """MAE of the chosen model and of persistence on the hours where both exist."""
-    h = holdout[holdout["target"] == target].dropna(subset=["actual_mw", "forecast_mw", "persistence_mw"])
-    mae = float((h["forecast_mw"] - h["actual_mw"]).abs().mean())
-    ref = float((h["persistence_mw"] - h["actual_mw"]).abs().mean())
-    mape = float(((h["forecast_mw"] - h["actual_mw"]).abs() / h["actual_mw"]).mean() * 100)
-    return {"hours": len(h), "mae_mw": mae, "persistence_mae_mw": ref, "skill": 1 - mae / ref,
-            "mape_pct": mape}
 
 
 def assumptions(cfg: dict) -> pd.DataFrame:
