@@ -47,6 +47,7 @@ FRIENDLY = {
     "curtailment_aware": "Smart charging",
     "curtailment_aware_persistence": "Smart charging, yesterday as forecast",
     "curtailment_aware_ml": "Smart charging, tomorrow's forecast",
+    "curtailment_aware_robust": "Smart charging, forecast with its errors",
 }
 EXPLAIN = {
     "uncontrolled": "What happens today: every car starts charging as soon as it plugs in.",
@@ -55,6 +56,8 @@ EXPLAIN = {
                          "and stay away from the evening peak, while every car still leaves full.",
     "curtailment_aware_ml": "Smart charging that only knows a machine-learning forecast of tomorrow, "
                             "as it would in real life.",
+    "curtailment_aware_robust": "Smart charging that knows the forecast and how wrong such forecasts "
+                                "have been, and makes one plan that works across those outcomes.",
 }
 # Ready-made days (2024 record). Sunday 3 Nov carries the most risk in the central
 # year; 9 June is the monsoon day where wind moves the risk past the solar peak;

@@ -124,3 +124,54 @@ def test_snsp_absorption_scales_with_limit():
     absorbed = (sig["curtailment_risk_mw"] - sch.curtailment_with_load(sig, load))
     noon = sig.index[12]
     assert absorbed[noon] == pytest.approx(0.2 * 10.0)
+
+
+def _dip_signal(dip_hour, nlmin=701.0):
+    """Like _signal but the demand dip, and so the only 1 MW of risk, is at `dip_hour`."""
+    idx = pd.date_range(DAY, periods=48, freq="h")
+    h = idx.hour
+    demand = np.full(len(idx), 1500.0)
+    demand[h == dip_hour] = 1100.0
+    solar = np.where((h >= 7) & (h <= 17), 300.0, 0.0)
+    base = pd.DataFrame({"demand_system_mw": demand, "solar_available_mw": solar,
+                         "wind_mw": 0.0, "must_take_mw": 100.0}, index=idx)
+    return bgs.scenario_signal(base, nlmin)
+
+
+def _absorbed(sig, prob, P):
+    load = sch.hourly_load_mw(prob, P)
+    return float(sig["curtailment_risk_mw"].sum() - sch.curtailment_with_load(sig, load).sum())
+
+
+def test_one_scenario_gives_the_deterministic_optimum():
+    S = _sessions([(10, 20, 40.0, 40.0, i, True) for i in range(25)]
+                  + [(17, 22, 30.0, 7.0, 30 + i, True) for i in range(20)])
+    sig = _signal(snsp=0.3)
+    w = {"peak": 1.0, "delay": 0.01}
+    prob, det = _run("curtailment_aware", S, signal=sig, weights=w)
+    rob = sch.run_strategy(prob, "curtailment_aware", sch.plan_grid([sig], prob.hours), w)
+    assert rob["status"] == "optimal"
+    assert sch.audit_schedule(prob, rob["P"], True)["total"] == 0
+    assert _absorbed(sig, prob, rob["P"]) == pytest.approx(_absorbed(sig, prob, det["P"]), abs=1e-6)
+    peak = lambda P: float((sig["net_load_mw"] + sch.hourly_load_mw(prob, P).reindex(sig.index, fill_value=0)).max())
+    assert peak(rob["P"]) == pytest.approx(peak(det["P"]), abs=1e-6)
+
+
+def test_scenarios_hedge_between_uncertain_risk_hours():
+    # 2 MWh of flexible energy; the 1 MW of risk is at 14:00 (A) or at 11:00 (B).
+    S = _sessions([(10, 16, 40.0, 40.0, i, True) for i in range(50)])
+    A, B = _dip_signal(14), _dip_signal(11)
+    w = {"peak": 0.0, "delay": 0.0}
+    prob, on_a = _run("curtailment_aware", S, signal=A, weights=w)
+    rob = sch.run_strategy(prob, "curtailment_aware", sch.plan_grid([A, B], prob.hours), w)
+    assert sch.audit_schedule(prob, rob["P"], True)["total"] == 0
+    assert _absorbed(A, prob, rob["P"]) == pytest.approx(1.0)
+    assert _absorbed(B, prob, rob["P"]) == pytest.approx(1.0)
+    assert _absorbed(B, prob, on_a["P"]) < 0.5          # planning on A alone misses B
+
+
+def test_scenarios_only_for_curtailment_aware():
+    S = _sessions([(10, 16, 40.0, 40.0, 0, True)])
+    prob = sch.day_problem(DAY, S, 1e6)
+    with pytest.raises(ValueError):
+        sch.run_strategy(prob, "solar_following", sch.plan_grid([_signal()], prob.hours), {})

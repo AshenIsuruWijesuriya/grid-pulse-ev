@@ -11,6 +11,11 @@ Strategies
     curtailment_aware_ml            plans on the day-ahead forecast from
                                     forecast_grid.py (run it first), scored on
                                     today's actual signal
+    curtailment_aware_robust        plans one schedule against K grid scenarios:
+                                    the same forecast plus the forecast errors
+                                    of K analog days (forecast_scenarios), by
+                                    minimising the scenario-average curtailment
+                                    and peak; scored on today's actual signal
 
 Days
     A day is schedulable when it, the previous day (persistence forecast) and
@@ -57,13 +62,15 @@ PLAN_COLUMNS = ["net_load_mw", "demand_system_mw", "vre_mw", "solar_mw"]
 # Reference categorical palette, slots 1-4 in fixed order (dataviz skill).
 COLORS = {"uncontrolled": "#2a78d6", "solar_following": "#eb6834",
           "curtailment_aware": "#1baf7a", "curtailment_aware_persistence": "#eda100",
-          "curtailment_aware_ml": "#e87ba4"}
+          "curtailment_aware_ml": "#e87ba4", "curtailment_aware_robust": "#6250d6"}
 INK, INK_2, GRID = "#0b0b0b", "#52514e", "#e4e3df"
 LABELS = {"uncontrolled": "Uncontrolled", "solar_following": "Solar-following",
           "curtailment_aware": "Curtailment-aware",
           "curtailment_aware_persistence": "Curtailment-aware (persistence forecast)",
-          "curtailment_aware_ml": "Curtailment-aware (ML day-ahead forecast)"}
-FORECAST_SUFFIXES = ("_persistence", "_ml")
+          "curtailment_aware_ml": "Curtailment-aware (ML day-ahead forecast)",
+          "curtailment_aware_robust": "Curtailment-aware (forecast scenarios)"}
+FORECAST_SUFFIXES = ("_persistence", "_ml", "_robust")
+FORECAST_TARGETS = ["demand_system_mw", "solar_available_mw", "wind_mw", "must_take_mw"]
 
 
 # --------------------------------------------------------------------------- #
@@ -108,15 +115,85 @@ def ml_forecast_plan(base: pd.DataFrame, cfg: dict, **override) -> pd.DataFrame 
     `override` takes the same keywords as bgs.scenario_kwargs, so the plan uses
     the same scenario as the signal it is scored on.
     """
+    fc = load_forecast(base, cfg)
+    if fc is None:
+        return None
+    fbase = base.copy()
+    fbase[FORECAST_TARGETS] = fc
+    return bgs.scenario_signal(fbase, **bgs.scenario_kwargs(cfg, **override))
+
+
+def load_forecast(base: pd.DataFrame, cfg: dict) -> pd.DataFrame | None:
+    """The day-ahead forecast of the four targets on base's hours, or None if absent."""
     fpath = PROJECT_ROOT / "data/processed/grid" / f"grid_forecast_{cfg['grid']['year']}_hourly.csv"
     if not fpath.is_file():
         return None
     fc = pd.read_csv(fpath)
     fc.index = pd.to_datetime(fc["hour_start_local"], utc=True).dt.tz_convert(TZ)
-    fbase = base.copy()
-    for col in ("demand_system_mw", "solar_available_mw", "wind_mw", "must_take_mw"):
-        fbase[col] = fc[col].reindex(base.index)
-    return bgs.scenario_signal(fbase, **bgs.scenario_kwargs(cfg, **override))
+    return fc[FORECAST_TARGETS].reindex(base.index)
+
+
+def analog_days(days: pd.DatetimeIndex, candidates: pd.DatetimeIndex, k: int,
+                past_only: bool = False) -> np.ndarray:
+    """For each day, the k candidate days of OTHER months nearest in day of year.
+
+    Excluding the day's own month follows the leave-one-month-out forecast: no
+    day's own month informs its forecast or its error scenarios. `past_only`
+    keeps only months before the day's month (strictly causal); a day with
+    fewer than k such days gets -1 (no scenarios).
+    """
+    out = np.empty((len(days), k), dtype=int)
+    cdoy, cmonth = candidates.dayofyear.to_numpy(), candidates.month.to_numpy()
+    for i, d in enumerate(days):
+        gap = np.abs(cdoy - d.dayofyear)
+        gap = np.minimum(gap, 366 - gap).astype(float)
+        gap[cmonth == d.month] = np.inf
+        if past_only:
+            gap[candidates >= d.replace(day=1)] = np.inf
+        order = np.argsort(gap, kind="stable")[:k]
+        if not np.isfinite(gap[order]).all():
+            if not past_only:
+                raise ValueError(f"fewer than {k} analog days for {d.date()}")
+            order = np.full(k, -1)
+        out[i] = order
+    return out
+
+
+def forecast_scenarios(base: pd.DataFrame, cfg: dict, k: int | None = None,
+                       past_only: bool = False, **override) -> list[pd.DataFrame] | None:
+    """K grid scenarios around the day-ahead forecast, for curtailment_aware_robust.
+
+    Scenario j for day d = forecast(d) + the forecast errors (actual - forecast)
+    of d's j-th analog day, hour by hour. All four targets take their errors
+    from the same analog day, so their correlation is kept (e.g. a cloudy
+    afternoon with lower demand). Solar, wind and must-take stay >= 0.
+    Days without analogs (past_only in January) get NaN, so planning them fails
+    loudly rather than silently using the plain forecast.
+    """
+    fc = load_forecast(base, cfg)
+    if fc is None:
+        return None
+    k = int(k or cfg["central"]["forecast_scenarios"])
+    days = base.index.normalize().unique()
+    if len(base) != 24 * len(days):
+        raise ValueError("forecast scenarios need 24 hours on every day")
+    usable = (base["hour_status"] == "complete") & ~base["is_system_event_day"]
+    err = (base[FORECAST_TARGETS] - fc).where(usable, np.nan)
+    complete = err.notna().all(axis=1).groupby(base.index.normalize()).all()
+    candidates = complete.index[complete.to_numpy()]
+    pick = analog_days(days, candidates, k, past_only)
+    pos = {d: i for i, d in enumerate(days)}
+    err_by_day = err.to_numpy().reshape(len(days), 24, len(FORECAST_TARGETS))
+    none = np.full((24, len(FORECAST_TARGETS)), np.nan)
+    out = []
+    for j in range(k):
+        e = np.stack([err_by_day[pos[candidates[c]]] if c >= 0 else none for c in pick[:, j]])
+        sb = base.copy()
+        sb[FORECAST_TARGETS] = fc.to_numpy() + e.reshape(len(base), len(FORECAST_TARGETS))
+        for col in ("solar_available_mw", "wind_mw", "must_take_mw"):
+            sb[col] = sb[col].clip(lower=0)
+        out.append(bgs.scenario_signal(sb, **bgs.scenario_kwargs(cfg, **override)))
+    return out
 
 
 def experiment_days(base: pd.DataFrame, cfg: dict, quick: bool = False) -> dict:
@@ -189,7 +266,10 @@ def run_case(days: list, sessions: pd.DataFrame, signal: pd.DataFrame, cfg: dict
             suffix = next((k for k in FORECAST_SUFFIXES if s.endswith(k)), "")
             plan = plans[suffix] if suffix else signal
             mode = s[: len(s) - len(suffix)] if suffix else s
-            runs[s] = (mode, plan.loc[window] if mode != "uncontrolled" else None)
+            if mode == "uncontrolled":
+                runs[s] = (mode, None)
+            else:
+                runs[s] = (mode, [p.loc[window] for p in plan] if isinstance(plan, list) else plan.loc[window])
         tasks.append((d, sessions[sessions["day"] == d.strftime("%Y-%m-%d")], station_kw, runs, weights))
     results = pool.map(solve_day, tasks) if pool else map(solve_day, tasks)
     kept, dropped = [], []
@@ -439,6 +519,8 @@ def main() -> None:
     if ml is not None:
         plans["_ml"] = ml
         strategies.append("curtailment_aware_ml")
+        plans["_robust"] = forecast_scenarios(base, cfg)
+        strategies.append("curtailment_aware_robust")
     else:
         print("No forecast file; run forecast_grid.py to add the ML-forecast strategy.")
     pool = ProcessPoolExecutor(args.workers) if args.workers > 1 else None
@@ -516,6 +598,26 @@ def main() -> None:
         tradeoff.to_csv(out / "so5_tradeoff.csv", index=False)
         if len(tradeoff):
             plot_tradeoff(tradeoff, out / "figures/so5_tradeoff.png")
+
+        if "_robust" in plans:
+            # Scenario planning: number of scenarios, and errors from past months only.
+            rows = []
+            for k in sw["forecast_scenarios"]:
+                for past in (False, True):
+                    r = run_case(risk_days, sessions, central_signal, cfg,
+                                 ["uncontrolled", "curtailment_aware_robust"], c["weights"],
+                                 c["station_capacity_kw"],
+                                 {"_robust": forecast_scenarios(base, cfg, k, past_only=past)}, pool)
+                    m = r["metrics"].get("curtailment_aware_robust")
+                    if m:
+                        rows.append({"scenarios": k, "past_months_only": past, **{f: m[f] for f in (
+                            "absorbed_mwh", "mean_evening_peak_increase_mw",
+                            "evening_peak_reduction_pct_of_ev_increase", "mean_delay_min",
+                            "p95_delay_min", "completion_rate", "constraint_violations",
+                            "solver_s_total")}, "days": m["days"],
+                            "dropped_days": len(r["dropped_days"])})
+                    print(f"scenarios k={k} past_only={past} done")
+            pd.DataFrame(rows).to_csv(out / "robust_scenario_count.csv", index=False)
 
         base_rank = None
         sens_rows = []

@@ -72,7 +72,7 @@ Run from the project root once the PUCSL 2024 data are preprocessed and the NASA
 - `forecast_grid.py`: day-ahead demand, solar, wind and must-take forecasts. Each model is chosen on July–September and kept only where it beats persistence; Oct–Dec is the untouched test. Solar uses the ECMWF forecast, taken only from runs published before midnight.
 - `ev_sessions.py`: session sets, parametric now and a GMM fitted to ACN-Data with `--acn-json` (SO3).
 - `schedule_ev_charging.py`: uncontrolled, solar-following and curtailment-aware strategies, plus the constraint audit (SO4).
-- `run_experiments.py`: comparison on a weekly sample and on every risk day, weight trade-off, sensitivity, and forecast-based planning (SO5/SO6). `--workers` solves days in parallel. Outputs go to `results/experiments/`.
+- `run_experiments.py`: comparison on a weekly sample and on every risk day, weight trade-off, sensitivity, and forecast-based planning (SO5/SO6): on the forecast alone, and on the forecast plus 20 scenarios of its past errors (`curtailment_aware_robust`, checked for 5–40 scenarios in `robust_scenario_count.csv`). `--workers` solves days in parallel. Outputs go to `results/experiments/`.
 - `benchmark_scaling.py`: solve time from 1,000 to 30,000 sessions on one day (NFR1, NFR2).
 
 ### Prototype app (WBS 5.11, FR13)

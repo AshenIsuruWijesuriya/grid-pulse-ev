@@ -5,6 +5,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
@@ -105,3 +106,42 @@ def test_absorbed_by_day_matches_load_in_risk_hours():
     out = rx.absorbed_by_day({"days": [day], "loads": {"a": load}}, sig)
     assert out.loc["2024-03-10", "risk_mwh"] == 50.0
     assert out.loc["2024-03-10", "a"] == 20.0
+
+
+def test_analog_days_are_nearest_dates_in_other_months():
+    days = pd.date_range("2024-01-01", "2024-03-31", freq="D", tz=TZ)
+    pick = rx.analog_days(days, days, 3)
+    feb1 = days.get_loc(pd.Timestamp("2024-02-01", tz=TZ))
+    chosen = days[pick[feb1]]
+    assert (chosen.month != 2).all()
+    assert list(chosen.strftime("%m-%d")) == ["01-31", "01-30", "01-29"]
+    jan1 = days[pick[0]]                                   # Jan 1: nearest other-month days are in Feb
+    assert (jan1.month == 2).all() and jan1[0].day == 1
+
+
+def test_forecast_scenarios_add_analog_errors_and_skip_unusable_days(monkeypatch):
+    idx = pd.date_range("2024-01-01", "2024-03-31 23:00", freq="h", tz=TZ)
+    rng = np.random.default_rng(1)
+    base = pd.DataFrame({t: 1000 + 100 * rng.random(len(idx)) for t in rx.FORECAST_TARGETS}, index=idx)
+    base["hour_status"] = "complete"
+    base["is_system_event_day"] = False
+    day_no = (idx.normalize() - idx[0]).days.to_numpy()
+    fc = base[rx.FORECAST_TARGETS].sub(day_no.astype(float), axis=0)          # error of day i is +i MW
+    base.loc[idx.normalize() == pd.Timestamp("2024-01-31", tz=TZ), "hour_status"] = "partial"
+    monkeypatch.setattr(rx, "load_forecast", lambda b, cfg: fc)
+    monkeypatch.setattr(rx.bgs, "scenario_kwargs", lambda cfg, **o: {"nlmin_mw": 0.0})
+    sc = rx.forecast_scenarios(base, {"central": {"forecast_scenarios": 2}})
+    assert len(sc) == 2
+    t = pd.Timestamp("2024-02-01 12:00", tz=TZ)
+    # Feb 1's nearest other-month days are Jan 31 (unusable, skipped), Jan 30, Jan 29.
+    assert sc[0].loc[t, "demand_system_mw"] == pytest.approx(fc.loc[t, "demand_system_mw"] + 29)
+    assert sc[1].loc[t, "demand_system_mw"] == pytest.approx(fc.loc[t, "demand_system_mw"] + 28)
+    assert sc[0].loc[t, "wind_mw"] == pytest.approx(fc.loc[t, "wind_mw"] + 29)  # same analog for every target
+
+
+def test_past_only_analogs_never_look_ahead():
+    days = pd.date_range("2024-01-01", "2024-03-31", freq="D", tz=TZ)
+    pick = rx.analog_days(days, days, 3, past_only=True)
+    mar15 = days.get_loc(pd.Timestamp("2024-03-15", tz=TZ))
+    assert (days[pick[mar15]] < pd.Timestamp("2024-03-01", tz=TZ)).all()
+    assert (pick[days.month == 1] == -1).all()                # January has no earlier month

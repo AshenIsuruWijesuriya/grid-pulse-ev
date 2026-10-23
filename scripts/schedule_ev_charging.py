@@ -123,7 +123,10 @@ def station_load(prob: DayProblem, P: np.ndarray) -> np.ndarray:
 # LP strategies
 # --------------------------------------------------------------------------- #
 
-def plan_grid(signal: pd.DataFrame, hours: pd.DatetimeIndex) -> pd.DataFrame:
+def plan_grid(signal, hours: pd.DatetimeIndex):
+    """The planning grid over `hours`; a list of scenario signals gives a list of grids."""
+    if isinstance(signal, list):
+        return [plan_grid(s, hours) for s in signal]
     g = signal.reindex(hours)
     need = ["net_load_mw", "demand_system_mw", "vre_mw", "solar_mw", "nlmin_mw"]
     if g[need].isna().any().any():
@@ -131,9 +134,17 @@ def plan_grid(signal: pd.DataFrame, hours: pd.DatetimeIndex) -> pd.DataFrame:
     return g
 
 
-def solve_lp(prob: DayProblem, grid: pd.DataFrame, mode: str, weights: dict,
+def solve_lp(prob: DayProblem, grid, mode: str, weights: dict,
              fixed_P: np.ndarray) -> tuple[np.ndarray, str, float]:
-    """Optimise declared sessions; fixed_P holds the undeclared (on-arrival) load."""
+    """Optimise declared sessions; fixed_P holds the undeclared (on-arrival) load.
+
+    `grid` is one planning grid, or a list of scenario grids for the
+    curtailment-aware LP (see solve_lp_scenarios).
+    """
+    if isinstance(grid, list):
+        if mode != "curtailment_aware":
+            raise ValueError("scenario planning is defined for curtailment_aware only")
+        return solve_lp_scenarios(prob, grid, weights, fixed_P)
     ids = np.flatnonzero(prob.declared)
     P = fixed_P.copy()
     if not len(ids):
@@ -217,6 +228,94 @@ def solve_lp(prob: DayProblem, grid: pd.DataFrame, mode: str, weights: dict,
         return P, status, runtime
     x = np.clip(res.x[:nx], 0, None)
     P[ids[var_sess], var_slot] = x
+    return P, status, runtime
+
+
+def solve_lp_scenarios(prob: DayProblem, grids: list, weights: dict,
+                       fixed_P: np.ndarray) -> tuple[np.ndarray, str, float]:
+    """Curtailment-aware LP over K grid scenarios (sample average approximation).
+
+        minimise  (1/K) sum_k [ sum_h c_k(h) + w_peak * peak_k ]  + w_delay * delay
+        c_k(h)  >= NLmin - NL_k(h) - Lfix(h) - L(h)
+        c_k(h)  >= VRE_k(h) - snsp*(D_k(h) + Lfix(h) + L(h))   (if SNSP set)
+        peak_k  >= NL_k(h) + Lfix(h) + L(h)
+        L(h)     = hourly MW of the declared sessions' schedule
+
+    One schedule serves every scenario: it is fixed at 00:00 and cannot see
+    which grid occurs. L(h) is a separate variable so each scenario adds rows
+    with two entries instead of one entry per session slot. With one scenario
+    the optimum equals that of solve_lp.
+    """
+    ids = np.flatnonzero(prob.declared)
+    P = fixed_P.copy()
+    if not len(ids):
+        return P, "optimal", 0.0
+    a, d = prob.arr[ids], prob.dep[ids]
+    lens = d - a
+    nx = int(lens.sum())
+    var_sess = np.repeat(np.arange(len(ids)), lens)
+    offsets = np.repeat(np.cumsum(lens) - lens, lens)
+    var_slot = np.arange(nx) - offsets + np.repeat(a, lens)
+    var_hour = prob.slot_hour[var_slot]
+    H, K = len(prob.hours), len(grids)
+    i_L, i_c, i_peak = nx, nx + H, nx + H + K * H
+    n = i_peak + K
+    hrs = np.arange(H)
+
+    fixed_station = station_load(prob, fixed_P)
+    fixed_hour_mw = np.bincount(prob.slot_hour, weights=fixed_P.sum(axis=0),
+                                minlength=H) * KW_SLOT_TO_MW_HOUR
+    delay_h = (var_slot - a[var_sess]) * STEP_HOURS
+
+    rows, cols, vals, rhs = [], [], [], []
+    key = prob.station[ids][var_sess] * prob.n_slots + var_slot
+    ukey, row = np.unique(key, return_inverse=True)
+    rows.append(row); cols.append(np.arange(nx)); vals.append(np.ones(nx))
+    rhs.append(np.clip(prob.station_capacity_kw
+                       - fixed_station[ukey // prob.n_slots, ukey % prob.n_slots], 0, None))
+    r0 = len(ukey)
+    for k, g in enumerate(grids):
+        nl = g["net_load_mw"].to_numpy()
+        ck = i_c + k * H + hrs
+        # c_k >= NLmin - NL_k - Lfix - L   ->  -c_k - L <= -(NLmin - NL_k - Lfix)
+        rows += [r0 + hrs, r0 + hrs]; cols += [ck, i_L + hrs]; vals += [-np.ones(H), -np.ones(H)]
+        rhs.append(-(g["nlmin_mw"].to_numpy() - nl - fixed_hour_mw)); r0 += H
+        snsp = g["snsp_max"].iloc[0]
+        if pd.notna(snsp):
+            rows += [r0 + hrs, r0 + hrs]; cols += [ck, i_L + hrs]; vals += [-np.ones(H), np.full(H, -snsp)]
+            rhs.append(-(g["vre_mw"].to_numpy() - snsp * (g["demand_system_mw"].to_numpy() + fixed_hour_mw)))
+            r0 += H
+        # peak_k >= NL_k + Lfix + L   ->  L - peak_k <= -(NL_k + Lfix)
+        rows += [r0 + hrs, r0 + hrs]; cols += [i_L + hrs, np.full(H, i_peak + k)]
+        vals += [np.ones(H), -np.ones(H)]
+        rhs.append(-(nl + fixed_hour_mw)); r0 += H
+
+    cost = np.zeros(n)
+    cost[:nx] = (weights.get("delay", 0.0) + TIE_BREAK) * STEP_HOURS * delay_h / 1000
+    cost[i_c:i_peak] = 1.0 / K
+    cost[i_peak:] = weights.get("peak", 0.0) / K
+
+    A_ub = sparse.csr_matrix((np.concatenate(vals), (np.concatenate(rows), np.concatenate(cols))),
+                             shape=(r0, n))
+    # Session energy, then L(h) = sum of the hour's slots.
+    A_eq = sparse.csr_matrix((np.concatenate([np.full(nx, STEP_HOURS), np.full(nx, KW_SLOT_TO_MW_HOUR),
+                                              -np.ones(H)]),
+                              (np.concatenate([var_sess, len(ids) + var_hour, len(ids) + hrs]),
+                               np.concatenate([np.arange(nx), np.arange(nx), i_L + hrs]))),
+                             shape=(len(ids) + H, n))
+    b_eq = np.concatenate([prob.energy[ids], np.zeros(H)])
+    lo, hi = np.zeros(n), np.full(n, np.inf)
+    hi[:nx] = prob.pmax[ids][var_sess]
+    lo[i_peak:] = -np.inf
+
+    t0 = time.perf_counter()
+    res = linprog(cost, A_ub=A_ub, b_ub=np.concatenate(rhs), A_eq=A_eq, b_eq=b_eq,
+                  bounds=np.column_stack([lo, hi]), method="highs", options={"time_limit": 300})
+    runtime = time.perf_counter() - t0
+    status = STATUS.get(res.status, f"status_{res.status}")
+    if res.status != 0:
+        return P, status, runtime
+    P[ids[var_sess], var_slot] = np.clip(res.x[:nx], 0, None)
     return P, status, runtime
 
 

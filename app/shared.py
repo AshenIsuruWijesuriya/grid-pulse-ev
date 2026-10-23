@@ -20,7 +20,7 @@ import run_experiments as rx  # noqa: E402
 
 INK, INK_2, GRID_C, RISK = "#0b0b0b", "#52514e", "#e4e3df", "#e34948"
 ORDER = ["uncontrolled", "solar_following", "curtailment_aware", "curtailment_aware_persistence",
-         "curtailment_aware_ml"]
+         "curtailment_aware_ml", "curtailment_aware_robust"]
 YEARS = [2026, 2027, 2028, 2030]
 FLEETS = [1000, 3000, 10000, 20000]
 DISCLAIMER = ("Prototype. Wasted clean power is inferred from published grid limits (CEB), not measured. "

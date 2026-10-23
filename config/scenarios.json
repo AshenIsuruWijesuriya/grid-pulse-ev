@@ -82,6 +82,8 @@
     "station_source": "provisional: 50 kW site connection shared by its charge points",
     "declared_departure_fraction": 0.8,
     "kwh_per_km": 0.16,
+    "forecast_scenarios": 20,
+    "forecast_scenarios_source": "design choice: forecast + errors of the 20 nearest-date days of other months (sample average approximation); see results/experiments/robust_scenario_count.csv for 5-40",
     "weights": {"curtailment": 1.0, "peak": 1.0, "delay": 0.01}
   },
 
@@ -111,6 +113,7 @@
     "scenario_year": [2026, 2027, 2028, 2030],
     "declared_departure_fraction": [0.5, 0.8, 1.0],
     "peak_weight": [0.0, 0.25, 1.0, 4.0, 16.0],
-    "delay_weight": [0.0, 0.01, 0.1]
+    "delay_weight": [0.0, 0.01, 0.1],
+    "forecast_scenarios": [5, 10, 20, 40]
   }
 }

@@ -27,7 +27,8 @@ if not r["scenario_years"].empty:
 
 st.subheader(f"2. On the {len(summ.get('risk_days', []))} days that waste clean power", icon=":material/solar_power:")
 risk = r["risk_days"].set_index("strategy")
-main = [s for s in ("uncontrolled", "solar_following", "curtailment_aware", "curtailment_aware_ml") if s in risk.index]
+main = [s for s in ("uncontrolled", "solar_following", "curtailment_aware", "curtailment_aware_ml",
+                     "curtailment_aware_robust") if s in risk.index]
 cols = st.columns(3)
 for col, (field, title, fmt, sub) in zip(cols, [
         ("absorbed_mwh", "Clean power used (MWh)", ",.0f", "more is better"),
@@ -48,6 +49,19 @@ if not by_day.empty:
         "sits on the sunny hours, so both catch it.\n"
         "- With a **forecast** instead of perfect knowledge, most of the peak benefit remains but some of "
         "the clean-power benefit is lost.")
+    if {"curtailment_aware_ml", "curtailment_aware_robust"} <= set(risk.index):
+        perfect, fc, rob = (risk.loc[s] for s in ("curtailment_aware", "curtailment_aware_ml",
+                                                   "curtailment_aware_robust"))
+        lost = perfect["absorbed_mwh"] - fc["absorbed_mwh"]
+        back = rob["absorbed_mwh"] - fc["absorbed_mwh"]
+        if lost > 0:
+            st.markdown(
+                f"- Forecasts are wrong in ways that repeat. Making one plan that also works if tomorrow goes "
+                f"like similar past days where the forecast was wrong wins back **{back:,.0f} of the "
+                f"{lost:,.0f} MWh** the forecast loses, and adds {rob['mean_evening_peak_increase_mw']:.1f} MW "
+                f"to the evening peak (the forecast alone: {fc['mean_evening_peak_increase_mw']:.1f} MW). The "
+                f"price is waiting: {rob['mean_delay_min']:.0f} min on average instead of "
+                f"{fc['mean_delay_min']:.0f}.")
 
 st.subheader("3. Is it robust?", icon=":material/verified:")
 lead = summ.get("so6_curtailment_aware_not_outranked_share")
