@@ -6,13 +6,17 @@ information available at issue time is used:
                (known in advance), seasonal position (day-of-year sin/cos)
     lags       same hour yesterday (t-24 h), same hour last week (t-168 h),
                yesterday's daily mean of the target
-    weather    solar only: archived GFS irradiance FORECAST for the hour,
-    forecast   mean of the three NASA sites (download_nwp_forecast.py). It is
-               the forecast made >= 24 h before the hour (`nwp_lead_days` = 1).
-               For every hour with daylight that run starts no later than
-               12 UTC on D-1 and is published by about 22:00 local on D-1,
-               before the 00:00 issue time. Hours with no archived forecast
-               (1-18 Jan 2024) have no NWP prediction.
+    weather    solar only: archived irradiance FORECASTS, mean of the three
+    forecast   NASA sites (download_nwp_forecast.py, config `nwp_sources`).
+               Open-Meteo files hold the forecast made >= 24 h (day 1) and
+               >= 48 h (day 2) before each hour. Taking day 1 to come from
+               the latest 6-hourly run at least 24 h before the end of the
+               hour, that run is used only if run + publication delay is no
+               later than 00:00 local on D; otherwise the day-2 forecast is
+               used. So every value was public at issue time.
+               Feature: yesterday's solar at the same hour x (forecast
+               daylight irradiance of D / that of D-1). The ratio cancels the
+               weather model's bias and the monthly level of the target.
 No observed same-day weather is used.
 
 Targets (hourly MW, from grid_base_<year>_hourly.csv)
@@ -30,6 +34,7 @@ Models
 Validation
     1. Model choice uses the training period only: fit Jan-Jun, choose the
        lowest MAE on Jul-Sep. The Oct-Dec test months play no part in it.
+       The weather-forecast source (ECMWF or GFS) is chosen the same way.
     2. Chronological hold-out: refit Jan-Sep, test Oct-Dec. Accuracy (MAE,
        RMSE, MAPE) and skill = 1 - MAE/MAE_persistence. Every model of a
        target is scored on the same hours (those where all of them, and the
@@ -37,8 +42,8 @@ Validation
        post-processing the scheduler uses (no negatives, zero when dark).
        The hold-out predictions are saved for plotting.
     3. Robustness of the weather forecast: the chosen NWP model is re-run on
-       the forecast made >= 48 h ahead, which was certainly published before
-       the issue time.
+       the day-2 forecast only, which is public before the issue time under
+       any run-to-lead mapping.
     4. Decision quality on the hold-out: C(t) error and risk-hour
        precision/recall under the central scenario, with and without the
        weather forecast, on the same hours.
@@ -77,7 +82,9 @@ TRAIN_MONTHS = range(1, 10)
 TEST_MONTHS = range(10, 13)
 BASE_FEATURES = ["hour", "weekday", "weekend", "holiday", "day_after_holiday", "doy_sin", "doy_cos",
                  "lag_24", "lag_168", "prev_day_mean"]
-NWP_FEATURES = ["nwp_ghi"]
+NWP_FEATURES = ["nwp_scaled_lag_24"]
+NWP_DAYLIGHT_HOURS = range(5, 20)          # local hours that can have sun in Sri Lanka
+RUN_CYCLE = "6h"                           # ECMWF IFS and GFS start a run every 6 h
 
 
 def holiday_dates(years) -> set:
@@ -88,33 +95,58 @@ def holiday_dates(years) -> set:
     return out
 
 
-def nwp_local_hourly(csv_path: Path, year: int, lead_days: int) -> pd.Series:
-    """Forecast irradiance (W/m^2) for each local clock hour of `year`; NaN where not archived.
+def public_by_issue(sample_start: pd.DatetimeIndex, lead_days: int, delay_hours: float,
+                    issue: pd.DatetimeIndex) -> np.ndarray:
+    """True where the run behind a day-`lead_days` value was published by `issue`.
+
+    The run is the latest one starting at least `lead_days` x 24 h before the
+    end of the hour the value averages.
+    """
+    end = sample_start.tz_convert("UTC") + pd.offsets.Hour(1)
+    run = (end - pd.offsets.Hour(24 * lead_days)).floor(RUN_CYCLE)
+    return np.asarray(run + pd.offsets.Minute(round(60 * delay_hours)) <= issue)
+
+
+def nwp_local_hourly(csv_path: Path, year: int, delay_hours: float,
+                     lead_days: int | None = None) -> pd.Series:
+    """Forecast irradiance (W/m^2) for each local clock hour of `year`, as known at 00:00 that day.
 
     Same alignment as bgs.nasa_local_hourly: the files are labelled by the UTC
     hour they start, which is HH:30 in Sri Lanka, so local hour [h, h+1) is
-    the mean of the samples starting at h-0:30 and h+0:30.
+    the mean of the samples starting at h-0:30 and h+0:30. Each sample takes
+    the day-1 forecast if it was public at issue time, else day 2
+    (`lead_days` = 2 forces day 2). NaN where neither is archived.
     """
     df = pd.read_csv(csv_path)
-    utc = pd.to_datetime(df["timestamp_utc"], utc=True)
-    ghi = pd.Series(pd.to_numeric(df[f"shortwave_radiation_previous_day{lead_days}"]).to_numpy(),
-                    index=utc.dt.tz_convert(TZ))
-    if (ghi < 0).any():
+    start = pd.to_datetime(df["timestamp_utc"], utc=True).dt.tz_convert(TZ)
+    leads = {d: pd.Series(pd.to_numeric(df[f"shortwave_radiation_previous_day{d}"]).to_numpy(),
+                          index=start) for d in (1, 2)}
+    if any((s < 0).any() for s in leads.values()):
         raise ValueError(f"{csv_path}: negative forecast irradiance")
     hours = pd.date_range(f"{year}-01-01", f"{year + 1}-01-01", freq="h", inclusive="left", tz=TZ)
-    before = ghi.reindex(hours.shift(-30, freq="min")).to_numpy()
-    after = ghi.reindex(hours.shift(30, freq="min")).to_numpy()
-    out = pd.Series((before + after) / 2.0, index=hours, name=Path(csv_path).stem)
-    if out.notna().sum() < 0.9 * len(out):
-        raise ValueError(f"{csv_path}: forecast covers under 90% of local year {year}")
+    issue = hours.normalize()
+    halves = []
+    for minutes in (-30, 30):
+        s = hours.shift(minutes, freq="min")
+        v = pd.Series(np.nan, index=hours)
+        for d in ((2,) if lead_days == 2 else (2, 1)):      # day 1 overrides day 2
+            val = leads[d].reindex(s).to_numpy()
+            use = public_by_issue(s, d, delay_hours, issue) & ~np.isnan(val)
+            v[use] = val[use]
+        halves.append(v.to_numpy())
+    out = pd.Series((halves[0] + halves[1]) / 2.0, index=hours, name=Path(csv_path).stem)
+    if out.notna().sum() == 0:
+        raise ValueError(f"{csv_path}: no forecast for local year {year}")
     if out[out.index.hour.isin([0, 1, 2, 3, 22, 23])].max() > 1.0:
         raise ValueError(f"{csv_path}: non-zero overnight irradiance; time zone is wrong")
     return out
 
 
-def nwp_irradiance(site_paths: dict, year: int, lead_days: int) -> pd.Series:
+def nwp_irradiance(site_paths: dict, year: int, delay_hours: float,
+                   lead_days: int | None = None) -> pd.Series:
     """Mean forecast irradiance across sites (NaN unless every site has a forecast)."""
-    sites = {name: nwp_local_hourly(PROJECT_ROOT / p, year, lead_days) for name, p in site_paths.items()}
+    sites = {name: nwp_local_hourly(PROJECT_ROOT / p, year, delay_hours, lead_days)
+             for name, p in site_paths.items()}
     return pd.concat(sites, axis=1).mean(axis=1, skipna=False).rename("nwp_ghi")
 
 
@@ -138,7 +170,12 @@ def features(base: pd.DataFrame, target: str, holidays_: set,
     f["lag_168"] = y.shift(168)
     f["prev_day_mean"] = daily_mean.shift(24)
     if nwp is not None:
-        f["nwp_ghi"] = nwp.reindex(idx)
+        # Forecast daylight irradiance of the day, only when every daylight hour has one.
+        lit = nwp.reindex(idx).where(idx.hour.isin(NWP_DAYLIGHT_HOURS))
+        by_day = lit.groupby(idx.normalize())
+        day_sum = by_day.transform("sum").where(by_day.transform("count") == len(NWP_DAYLIGHT_HOURS))
+        ratio = (day_sum / day_sum.shift(24)).clip(0.25, 4.0)
+        f["nwp_scaled_lag_24"] = f["lag_24"] * ratio
     return f
 
 
@@ -291,12 +328,19 @@ def main() -> None:
     dark = dark_hours(base)
     train, test = month.isin(TRAIN_MONTHS), month.isin(TEST_MONTHS)
 
-    sites = cfg["grid"].get("nwp_sites", {})
-    lead = cfg["grid"].get("nwp_lead_days", 1)
-    nwp = None
-    if sites and all((PROJECT_ROOT / p).is_file() for p in sites.values()):
-        nwp = nwp_irradiance(sites, year, lead)
-    else:
+    # Weather-forecast source: the one whose NWP models score best on Jul-Sep.
+    sources = {name: s for name, s in cfg["grid"].get("nwp_sources", {}).items()
+               if all((PROJECT_ROOT / p).is_file() for p in s["sites"].values())}
+    nwp, source, source_check = None, None, {}
+    for name, s in sources.items():
+        n = nwp_irradiance(s["sites"], year, s["publication_delay_hours"])
+        _, val = select_model(features(base, SOLAR, hol, n), base[SOLAR], month,
+                              MODELS + NWP_MODELS, dark, SOLAR)
+        source_check[name] = {m: val[m] for m in NWP_MODELS + ["persistence"]}
+        if source is None or min(val[m]["mae"] for m in NWP_MODELS) < min(
+                source_check[source][m]["mae"] for m in NWP_MODELS):
+            nwp, source = n, name
+    if nwp is None:
         print("No weather-forecast files; run download_nwp_forecast.py to add the NWP solar models.")
 
     validation, holdout, lomo, best, best_no_nwp = {}, {}, {}, {}, {}
@@ -322,20 +366,23 @@ def main() -> None:
 
     nwp_info = None
     if nwp is not None:
+        s = sources[source]
         nwp_info = {
-            "source": "Open-Meteo Previous Runs API, NCEP GFS (gfs_seamless), archived forecasts",
-            "variable": f"shortwave_radiation_previous_day{lead} (W/m^2), mean of {', '.join(sites)}",
-            "lead_days": lead,
+            "source": f"Open-Meteo Previous Runs API, {source}, archived forecasts",
+            "variable": f"shortwave_radiation_previous_day1/2 (W/m^2), mean of {', '.join(s['sites'])}",
+            "rule": "day-1 value if its run + publication delay <= 00:00 local on the day, else day 2",
+            "publication_delay_hours": s["publication_delay_hours"],
+            "source_choice_on_selection_months": source_check,
             "daylight_hours_without_forecast_filled_with_persistence": nwp_fallback_hours,
         }
-        if best[SOLAR] in NWP_MODELS and lead < 2:
-            # Robustness: a forecast certainly published before 00:00 on D.
-            X2 = features(base, SOLAR, hol, nwp_irradiance(sites, year, 2))
-            p2 = postprocess(SOLAR, predict(best[SOLAR], X2, base[SOLAR], train, test), dark)
-            check = common_scores(base.loc[test, SOLAR], {"persistence": hold_preds["persistence"][SOLAR],
-                                                          f"lead_{lead}_day": hold_preds[best[SOLAR]][SOLAR],
-                                                          "lead_2_days": p2}, mape=False)
-            nwp_info["lead_sensitivity_holdout"] = check
+        nwp_model = min(NWP_MODELS, key=lambda m: validation[SOLAR][m]["mae"])
+        # Robustness: day-2 forecasts only, public by 00:00 under any run mapping.
+        X2 = features(base, SOLAR, hol, nwp_irradiance(s["sites"], year, s["publication_delay_hours"], 2))
+        p2 = postprocess(SOLAR, predict(nwp_model, X2, base[SOLAR], train, test), dark)
+        nwp_info["day2_only_holdout"] = {"model": nwp_model, **common_scores(
+            base.loc[test, SOLAR], {"persistence": hold_preds["persistence"][SOLAR],
+                                    "freshest_public": hold_preds[nwp_model][SOLAR],
+                                    "day2_only": p2}, mape=False)}
 
     # Decision quality: does the forecast find the risk hours? Same hours for every plan.
     sig_args = bgs.scenario_kwargs(cfg)
