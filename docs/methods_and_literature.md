@@ -23,7 +23,7 @@ station capacity and session behaviour are still tagged `provisional` in
 | Scheduler | LP, session + station constraints, 100% energy as a hard constraint, HiGHS | Time-coupled LP scheduling (Dixon et al. 2020; ACN-Sim offline optimal) | `solve_lp()` |
 | Curtailment term | Epigraph of max(0, ·) so absorbed MWh is exact in the LP | Standard LP reformulation | `solve_lp()` |
 | Forecast benchmark | Persistence: plan on yesterday's grid signal, score on today's | Standard naive benchmark (proposal Table 3.2) | `run_experiments.py` |
-| Day-ahead forecast | Ridge regression and gradient-boosted trees on calendar, Sri Lankan holiday/Poya and lag features. Each model is chosen on Jul–Sep (fit Jan–Jun) and used only if it beats persistence; every model is scored on the same hours | Standard short-term load-forecasting practice: calendar and lag regressors, naive benchmarks, chronological hold-out with a separate validation period (e.g. Hong & Fan 2016) | `forecast_grid.py` |
+| Day-ahead forecast | Ridge regression and gradient-boosted trees on calendar, Sri Lankan holiday/Poya and lag features. Each model is chosen on Jul–Sep with a rolling origin (each month predicted by a model fitted on all earlier months) and used only if it beats persistence; every model is scored on the same hours | Standard short-term load-forecasting practice: calendar and lag regressors, naive benchmarks, chronological hold-out with rolling-origin validation inside the training period (e.g. Hong & Fan 2016; Tashman 2000) | `forecast_grid.py` |
 | Solar weather input | Archived ECMWF IFS irradiance forecasts at the three NASA sites; per hour, the freshest run published before 00:00 local (day-1 bucket if run + 8 h ≤ issue, else day 2). Feature: yesterday's solar × forecast daylight irradiance ratio (D / D−1), which cancels NWP bias and the monthly level | Model Output Statistics: statistical post-processing of NWP output to a local target (Glahn & Lowry 1972) | `download_nwp_forecast.py`, `forecast_grid.py` |
 | Evaluation days | (a) one day per ISO week, rotating weekday: year-representative peak, delay, completion; (b) every schedulable day with risk: absorption and the weight trade-off | Stratified evaluation: a rare-event outcome needs its own stratum | `run_experiments.py` |
 | Validation | Independent constraint audit; identical sessions and grid hours across strategies; tie-aware ranking preserved across sweeps, and whether the proposed strategy is ever outranked (a tie becoming a win also breaks exact preservation) | Proposal §3.5 | `audit_schedule()`, `run_experiments.py` |
@@ -33,9 +33,10 @@ station capacity and session behaviour are still tagged `provisional` in
 | Model | Trained on | Validation | Result (Oct–Dec 2024 hold-out) |
 |---|---|---|---|
 | Demand forecast, gradient-boosted trees | 2024 Jan–Sep boundary-corrected hourly demand | Chosen on Jul–Sep; chronological hold-out | MAE 73 MW vs persistence 130 MW (skill 0.44), MAPE 3.9% |
-| Solar forecast, ridge + ECMWF forecast | 2024 Mar–Sep modelled available solar (ECMWF archive starts 6 Mar) | Chosen on Jul–Sep (skill 0.14; GFS 0.00, so ECMWF chosen); chronological hold-out | MAE 19.4 MW vs persistence 23.6 MW (skill 0.17); day-2 forecasts only: skill 0.11 |
-| Wind and must-take forecasts | — | Ridge lost to persistence on Jul–Sep | Persistence used. Ridge would have scored skill 0.10 and 0.14 on Oct–Dec; the earlier choice of ridge was made on the test months |
-| Combined risk-hour detection (2028 scenario) | Selected models above | Precision and recall of C(t) > 0 hours, same 2,006 hours for every plan | Precision 0.82, recall 0.53, risk MAE 4.2 MW (without the weather forecast: 0.72, 0.51, 5.5 MW; persistence: 0.20, 0.15); risk energy under-forecast by 48% (36% without) |
+| Solar forecast, ridge + ECMWF forecast | 2024 Mar–Sep modelled available solar (ECMWF archive starts 6 Mar) | Chosen on Jul–Sep (skill 0.13; GFS 0.06, so ECMWF chosen); chronological hold-out | MAE 19.4 MW vs persistence 23.6 MW (skill 0.17); day-2 forecasts only: skill 0.11 |
+| Wind forecast, ridge | 2024 Jan–Sep | Chosen on Jul–Sep (skill 0.05) | Skill 0.10 over persistence |
+| Must-take forecast | — | Ridge lost to persistence on Jul–Sep (skill −0.26) | Persistence used. Ridge would have scored skill 0.14 on Oct–Dec; it had earlier been chosen on the test months |
+| Combined risk-hour detection (2028 scenario) | Selected models above | Precision and recall of C(t) > 0 hours, same 2,006 hours for every plan | Precision 0.92, recall 0.54, risk MAE 4.1 MW (without the weather forecast: 0.78, 0.41, 5.1 MW; persistence: 0.20, 0.15); risk energy under-forecast by 47% (62% without) |
 | Session GMM | Not yet trained: needs ACN-Data download | BIC model selection; plausibility check | — |
 
 The LP scheduler and C(t) are optimisation and physical models; they are
@@ -128,5 +129,6 @@ whether the benefit holds at session level.
 - NASA Langley Research Center. POWER hourly API, accessed 2026-10-19.
 - Glahn, H. R., Lowry, D. A. (1972). The use of Model Output Statistics (MOS) in objective weather forecasting. *Journal of Applied Meteorology* 11(8), 1203–1211.
 - Open-Meteo. Previous Runs API (archived ECMWF IFS 0.25° and NCEP GFS forecasts), https://open-meteo.com/en/docs/previous-runs-api, accessed 2026-10-23.
+- Tashman, L. J. (2000). Out-of-sample tests of forecasting accuracy: an analysis and review. *International Journal of Forecasting* 16(4), 437–450.
 - Hong, T., Fan, S. (2016). Probabilistic electric load forecasting: A tutorial review. *International Journal of Forecasting* 32(3), 914–938. [Verify pages.]
 - Sri Lankan public and Poya holidays: `holidays` Python package (country code LK).

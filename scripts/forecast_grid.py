@@ -32,8 +32,9 @@ Models
                      of NWP output to the local target (Glahn & Lowry 1972)
 
 Validation
-    1. Model choice uses the training period only: fit Jan-Jun, choose the
-       lowest MAE on Jul-Sep. The Oct-Dec test months play no part in it.
+    1. Model choice uses the training period only: the lowest MAE on Jul-Sep
+       on a rolling origin (each month predicted by a model fitted on all
+       earlier months). The Oct-Dec test months play no part in it.
        The weather-forecast source (ECMWF or GFS) is chosen the same way.
     2. Chronological hold-out: refit Jan-Sep, test Oct-Dec. Accuracy (MAE,
        RMSE, MAPE) and skill = 1 - MAE/MAE_persistence. Every model of a
@@ -76,7 +77,6 @@ TARGETS = ["demand_system_mw", "solar_available_mw", "wind_mw", "must_take_mw"]
 SOLAR = "solar_available_mw"
 MODELS = ["persistence", "seasonal_naive", "ridge", "gbm"]
 NWP_MODELS = ["ridge_nwp", "gbm_nwp"]
-SELECT_FIT_MONTHS = range(1, 7)
 SELECT_MONTHS = range(7, 10)
 TRAIN_MONTHS = range(1, 10)
 TEST_MONTHS = range(10, 13)
@@ -266,13 +266,16 @@ def common_scores(y: pd.Series, preds: dict, mape: bool) -> dict:
 
 def select_model(X: pd.DataFrame, y: pd.Series, month: pd.Series, candidates: list[str],
                  dark: pd.Series, target: str) -> tuple[str, dict]:
-    """Lowest Jul-Sep MAE after fitting on Jan-Jun; the test months are not touched.
+    """Lowest Jul-Sep MAE on a rolling origin; the test months are not touched.
 
+    Each of Jul, Aug and Sep is predicted by a model fitted on every earlier
+    month, so the choice reflects a model trained on most of the training
+    period rather than one extrapolating from Jan-Jun into the monsoon.
     Ties go to the earlier candidate, so persistence wins unless beaten.
     """
-    fit, val = month.isin(SELECT_FIT_MONTHS), month.isin(SELECT_MONTHS)
-    preds = {m: postprocess(target, predict(m, X, y, fit, val), dark) for m in candidates}
-    val_scores = common_scores(y[val], preds, mape=False)
+    preds = {m: pd.concat([postprocess(target, predict(m, X, y, month < mo, month == mo), dark)
+                           for mo in SELECT_MONTHS]) for m in candidates}
+    val_scores = common_scores(y[month.isin(SELECT_MONTHS)], preds, mape=False)
     return min(candidates, key=lambda m: val_scores[m]["mae"]), val_scores
 
 
@@ -413,8 +416,9 @@ def main() -> None:
                    if nwp is not None else "Day-ahead forecast without NWP")
                   + "; central scenario parameters are provisional",
         "issue_time": "00:00 local, day-ahead",
-        "selection": {"fit_months": list(SELECT_FIT_MONTHS), "choose_on_months": list(SELECT_MONTHS),
-                      "rule": "lowest MAE on common hours; persistence unless beaten"},
+        "selection": {"choose_on_months": list(SELECT_MONTHS),
+                      "rule": "rolling origin (fit on all earlier months, predict the next); "
+                              "lowest MAE on common hours; persistence unless beaten"},
         "train_months": list(TRAIN_MONTHS), "test_months": list(TEST_MONTHS),
         "selection_accuracy": validation,
         "holdout_accuracy": holdout,
