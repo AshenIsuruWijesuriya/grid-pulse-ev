@@ -581,3 +581,86 @@ the day's maximum net load (18:00–20:00 on 3 Nov).
 - Overnight, invalid and capped trips were checked on the page.
 - Charts were rendered and inspected.
 - Tests: 166 passed.
+
+## 2026-10-23 — Weather-informed solar forecast and honest model selection (WBS 5.8, D8)
+
+**Activity:** Added archived weather forecasts to the day-ahead solar forecast
+and corrected how forecast models are chosen.
+
+**Data (`scripts/download_nwp_forecast.py`):**
+- Open-Meteo Previous Runs API, irradiance forecasts made at least 24 h
+  (day 1) and 48 h (day 2) before each hour, at the three NASA sites.
+  Same-day (day 0) values are never requested.
+- ECMWF IFS 0.25° (archive starts 6 Mar 2024) and NCEP GFS (starts
+  19 Jan 2024). Raw responses kept with a record of the request.
+- Open-Meteo labels an hour by its end. Checked against NASA POWER for
+  Colombo: correlation peaks at a 1-hour shift (0.953). After relabelling to
+  the hour start, all three sites line up at zero shift (0.944–0.957).
+
+**No information after the issue time:**
+- The scheduler plans at 00:00 local, so a forecast may be used only if it
+  was published by then. The Single Runs archive does not cover 2024, so the
+  run behind a value is inferred: the latest 6-hourly run at least 24 h (or
+  48 h) before the end of the hour.
+- Each hour takes the day-1 value if that run + publication delay is before
+  00:00 local (ECMWF 8 h, GFS 5 h, both conservative), otherwise day 2. For
+  ECMWF, hours up to 15:00 use day 1 and later hours day 2.
+- Robustness: the chosen model re-run on day-2 forecasts only, which are
+  public before 00:00 under any run mapping.
+
+**Model (`scripts/forecast_grid.py`):**
+- Raw forecast irradiance as a feature lost to persistence: the weather
+  model's bias and the target's monthly level (CEB monthly energy) do not
+  match. The feature used is yesterday's solar at the same hour × (forecast
+  daylight irradiance of the day / that of the previous day). The ratio
+  cancels both (Model Output Statistics, Glahn & Lowry 1972).
+
+**Selection correction:**
+- The previous code chose each target's model by its score on Oct–Dec, the
+  months used to report accuracy. Choices are now made on Jul–Sep only, by a
+  rolling origin (each month predicted by a model fitted on all earlier
+  months). Every model of a target is scored on the same hours.
+- Disclosure: Oct–Dec scores of the first weather model (raw GFS
+  irradiance) were seen before the ratio feature and ECMWF were chosen; both
+  choices were then made on Jul–Sep scores only. The first selection rule was
+  a single split (fit Jan–Jun, judge Jul–Sep). It was replaced by the rolling
+  origin after the scheduling run showed persistence for wind costing evening
+  peak. The reason for the change is a priori: a single split judges a model
+  fitted on six pre-monsoon months. Under the single split wind would use
+  persistence; every other choice is the same.
+
+**Results (Oct–Dec 2024, not used for any choice):**
+
+| Target | Chosen on Jul–Sep | Hold-out MAE | Persistence | Skill |
+|---|---|---|---|---|
+| Demand | Gradient boosting | 73.4 MW (MAPE 3.9%) | 130.2 MW | 0.44 |
+| Solar | Ridge + ECMWF | 19.4 MW | 23.6 MW | 0.17 |
+| Solar, day-2 only | same | 21.0 MW | 23.6 MW | 0.11 |
+| Wind | Ridge | 31.5 MW | 34.8 MW | 0.10 |
+| Must-take | Persistence | 25.7 MW | 25.7 MW | 0 |
+
+- Source: ECMWF Jul–Sep skill 0.13, GFS 0.06, so ECMWF.
+- Must-take: ridge lost on Jul–Sep (skill −0.26) although it scores 0.14 on
+  Oct–Dec. The earlier wind and must-take skills (0.09, 0.12) came from
+  choosing on the test months.
+- Risk-hour detection (2028 scenario, the same 2,006 hours for every plan):
+
+  | Plan | Precision | Recall | Risk MAE |
+  |---|---|---|---|
+  | Persistence | 0.20 | 0.15 | 9.7 MW |
+  | Chosen models, no weather forecast | 0.78 | 0.41 | 5.1 MW |
+  | Chosen models + ECMWF | 0.92 | 0.54 | 4.1 MW |
+
+  Risk energy is still under-forecast by 47%.
+- Scheduling on the new forecast (10 risk days): 476.1 MWh absorbed and
+  +6.13 MW evening peak, against 520.5 MWh and +5.16 MW with perfect
+  knowledge. A 17% more accurate solar forecast did not give a better
+  schedule: about 44 MWh is still lost to forecast error.
+
+**Limitations:**
+- No ECMWF archive before 6 Mar 2024: 952 daylight hours (including risk days
+  4 and 11 Feb) use persistence for solar.
+- The run-to-lead mapping and the publication delays are assumptions; the
+  day-2 check bounds their effect.
+- The solar target is modelled from NASA POWER irradiance, not metered output.
+- Scheduling uses leave-one-month-out forecasts, which see later months.
