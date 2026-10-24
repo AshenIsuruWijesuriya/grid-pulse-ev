@@ -226,14 +226,15 @@ def persistence_plan(signal: pd.DataFrame) -> pd.DataFrame:
 def solve_day(task: tuple) -> dict:
     """Solve every strategy for one day (module level so worker processes can run it).
 
-    task = (day, sessions of that day, station kW, {strategy: (mode, planning grid)}, weights)
+    task = (day, sessions of that day, station kW, {strategy: (mode, planning grid)}, weights,
+            station rule)
     """
-    d, sd, station_kw, runs, weights = task
+    d, sd, station_kw, runs, weights, rule = task
     prob = sch.day_problem(d, sd, station_kw)
     out = {}
     for s, (mode, plan) in runs.items():
         grid = sch.plan_grid(plan, prob.hours) if plan is not None else None
-        r = sch.run_strategy(prob, mode, grid, weights)
+        r = sch.run_strategy(prob, mode, grid, weights, rule)
         res = {"status": r["status"], "solver_s": r["solver_s"]}
         if r["status"] in ("optimal", "simulated"):
             full = prob.declared if s != "uncontrolled" else False
@@ -270,7 +271,8 @@ def run_case(days: list, sessions: pd.DataFrame, signal: pd.DataFrame, cfg: dict
                 runs[s] = (mode, None)
             else:
                 runs[s] = (mode, [p.loc[window] for p in plan] if isinstance(plan, list) else plan.loc[window])
-        tasks.append((d, sessions[sessions["day"] == d.strftime("%Y-%m-%d")], station_kw, runs, weights))
+        tasks.append((d, sessions[sessions["day"] == d.strftime("%Y-%m-%d")], station_kw, runs, weights,
+                      cfg["central"].get("station_rule", "arrival_first")))
     results = pool.map(solve_day, tasks) if pool else map(solve_day, tasks)
     kept, dropped = [], []
     for d, day_runs in zip(days, results):
@@ -628,8 +630,16 @@ def main() -> None:
                  + [("Declared departure share", v, central_signal,
                      evs.build_session_set(all_days, cfg, seed, gmm, v))
                     for v in sw["declared_departure_fraction"]])
-        for dim, val, sig, sess in cases:
-            r = run_case(sweep_days, sess, sig, cfg, three, c["weights"], c["station_capacity_kw"],
+        cases = [(*case, cfg) for case in cases]
+        # The other station rule, where it matters: when not everyone declares.
+        other = {**cfg, "central": {**c, "station_rule": "declared_first"
+                                    if c.get("station_rule", "arrival_first") == "arrival_first"
+                                    else "arrival_first"}}
+        cases += [(f"Declared share, {other['central']['station_rule'].replace('_', ' ')} rule", v,
+                   central_signal, evs.build_session_set(all_days, cfg, seed, gmm, v), other)
+                  for v in sw["declared_departure_fraction"]]
+        for dim, val, sig, sess, case_cfg in cases:
+            r = run_case(sweep_days, sess, sig, case_cfg, three, c["weights"], c["station_capacity_kw"],
                          pool=pool)
             rk = ranking(r["metrics"]) if r["metrics"] else None
             if base_rank is None and rk:
@@ -642,6 +652,7 @@ def main() -> None:
                                   "mean_evening_peak_increase_mw": m["mean_evening_peak_increase_mw"],
                                   "mean_delay_min": m["mean_delay_min"],
                                   "completion_rate": m["completion_rate"],
+                                  "undeclared_completion_rate": m["undeclared_completion_rate"],
                                   "constraint_violations": m["constraint_violations"],
                                   "days": m["days"], "dropped_days": len(r["dropped_days"]),
                                   "ranking_preserved": rk == base_rank if rk else None,

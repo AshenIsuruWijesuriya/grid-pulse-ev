@@ -19,8 +19,16 @@ Hard constraints in both LPs (proposal FR10)
     sum_t p[s,t] * 0.25 h = energy_kwh[s]   (100 % completion)
     sum_{s at station k} p[s,t] <= station capacity   for every k, t
 Sessions without a declared departure cannot be shifted: they charge on
-arrival and their load is fixed before the LP runs. An infeasible LP is
-REPORTED, never relaxed (README: report infeasibility, do not hide it).
+arrival. Two station rules decide who gets the connection first:
+    arrival_first   undeclared load is fixed before the LP runs and takes
+                    its share of station capacity (the original rule)
+    declared_first  declared sessions are planned with the full station
+                    capacity and keep their 100 % guarantee; undeclared
+                    sessions then charge on arrival in what is left, with no
+                    guarantee. The LP uses their on-arrival load only as its
+                    estimate of their effect on the grid.
+An infeasible LP is REPORTED, never relaxed (README: report infeasibility,
+do not hide it).
 
 Solver: HiGHS through scipy.optimize.linprog. Every returned schedule is
 re-checked by audit_schedule(), which does not trust the solver.
@@ -42,6 +50,7 @@ KW_SLOT_TO_MW_HOUR = 1 / (SLOTS_PER_HOUR * 1000)   # hourly mean MW per kW in on
 TIE_BREAK = 1e-4                                     # prefer earlier charging on ties
 TOL_KWH = 1e-3
 TOL_KW = 1e-3
+STATION_RULES = ("arrival_first", "declared_first")
 STATUS = {0: "optimal", 1: "iteration_or_time_limit", 2: "infeasible",
           3: "unbounded", 4: "numerical_difficulty"}
 
@@ -135,16 +144,18 @@ def plan_grid(signal, hours: pd.DatetimeIndex):
 
 
 def solve_lp(prob: DayProblem, grid, mode: str, weights: dict,
-             fixed_P: np.ndarray) -> tuple[np.ndarray, str, float]:
+             fixed_P: np.ndarray, fixed_holds_capacity: bool = True) -> tuple[np.ndarray, str, float]:
     """Optimise declared sessions; fixed_P holds the undeclared (on-arrival) load.
 
     `grid` is one planning grid, or a list of scenario grids for the
-    curtailment-aware LP (see solve_lp_scenarios).
+    curtailment-aware LP (see solve_lp_scenarios). With fixed_holds_capacity
+    False, fixed_P counts on the grid but not against station capacity
+    (declared_first rule).
     """
     if isinstance(grid, list):
         if mode != "curtailment_aware":
             raise ValueError("scenario planning is defined for curtailment_aware only")
-        return solve_lp_scenarios(prob, grid, weights, fixed_P)
+        return solve_lp_scenarios(prob, grid, weights, fixed_P, fixed_holds_capacity)
     ids = np.flatnonzero(prob.declared)
     P = fixed_P.copy()
     if not len(ids):
@@ -160,7 +171,7 @@ def solve_lp(prob: DayProblem, grid, mode: str, weights: dict,
     n = nx + H + 1                                    # x, c(h), peak
     i_c, i_peak = nx, nx + H
 
-    fixed_station = station_load(prob, fixed_P)
+    fixed_station = station_load(prob, fixed_P if fixed_holds_capacity else np.zeros_like(fixed_P))
     fixed_hour_mw = np.bincount(prob.slot_hour, weights=fixed_P.sum(axis=0),
                                 minlength=H) * KW_SLOT_TO_MW_HOUR
     delay_h = (var_slot - a[var_sess]) * STEP_HOURS
@@ -231,8 +242,8 @@ def solve_lp(prob: DayProblem, grid, mode: str, weights: dict,
     return P, status, runtime
 
 
-def solve_lp_scenarios(prob: DayProblem, grids: list, weights: dict,
-                       fixed_P: np.ndarray) -> tuple[np.ndarray, str, float]:
+def solve_lp_scenarios(prob: DayProblem, grids: list, weights: dict, fixed_P: np.ndarray,
+                       fixed_holds_capacity: bool = True) -> tuple[np.ndarray, str, float]:
     """Curtailment-aware LP over K grid scenarios (sample average approximation).
 
         minimise  (1/K) sum_k [ sum_h c_k(h) + w_peak * peak_k ]  + w_delay * delay
@@ -262,7 +273,7 @@ def solve_lp_scenarios(prob: DayProblem, grids: list, weights: dict,
     n = i_peak + K
     hrs = np.arange(H)
 
-    fixed_station = station_load(prob, fixed_P)
+    fixed_station = station_load(prob, fixed_P if fixed_holds_capacity else np.zeros_like(fixed_P))
     fixed_hour_mw = np.bincount(prob.slot_hour, weights=fixed_P.sum(axis=0),
                                 minlength=H) * KW_SLOT_TO_MW_HOUR
     delay_h = (var_slot - a[var_sess]) * STEP_HOURS
@@ -320,14 +331,21 @@ def solve_lp_scenarios(prob: DayProblem, grids: list, weights: dict,
 
 
 def run_strategy(prob: DayProblem, strategy: str, grid: pd.DataFrame | None,
-                 weights: dict) -> dict:
+                 weights: dict, rule: str = "arrival_first") -> dict:
+    if rule not in STATION_RULES:
+        raise ValueError(f"unknown station rule {rule}")
     t0 = time.perf_counter()
     if strategy == "uncontrolled":
         P = asap_profile(prob, np.ones(len(prob.arr), dtype=bool))
         return {"P": P, "status": "simulated", "solver_s": 0.0,
                 "wall_s": time.perf_counter() - t0}
     fixed = asap_profile(prob, ~prob.declared)
-    P, status, solver_s = solve_lp(prob, grid, strategy, weights, fixed)
+    P, status, solver_s = solve_lp(prob, grid, strategy, weights, fixed,
+                                   fixed_holds_capacity=(rule == "arrival_first"))
+    if rule == "declared_first" and status == "optimal":
+        # Undeclared sessions charge on arrival in the capacity the plan leaves.
+        P[~prob.declared] = 0.0
+        P += asap_profile(prob, ~prob.declared, fixed_station_kw=station_load(prob, P))
     return {"P": P, "status": status, "solver_s": solver_s,
             "wall_s": time.perf_counter() - t0}
 
@@ -369,6 +387,7 @@ def session_outcomes(prob: DayProblem, P: np.ndarray) -> pd.DataFrame:
         "completed": done,
         "delay_min": np.clip(delay, 0, None),
         "shiftable": prob.declared & (prob.dep - prob.arr > need),
+        "declared": prob.declared,
     })
 
 
@@ -423,6 +442,8 @@ def evaluate(days: list, signal: pd.DataFrame, load_mw: pd.Series,
         "mean_evening_peak_mw": round(float(eve[:, 0].mean()), 2),
         "mean_evening_peak_increase_mw": round(float((eve[:, 0] - eve[:, 1]).mean()), 2),
         "completion_rate": round(float(done.mean()), 4),
+        "undeclared_completion_rate": (round(float(done[~outcomes["declared"]].mean()), 4)
+                                       if (~outcomes["declared"]).any() else None),
         "unmet_kwh": round(float((outcomes["requested_kwh"] - outcomes["delivered_kwh"]).clip(lower=0).sum()), 2),
         "mean_delay_min": round(float(outcomes.loc[done, "delay_min"].mean()), 1),
         "p95_delay_min": round(float(outcomes.loc[done, "delay_min"].quantile(0.95)), 1),

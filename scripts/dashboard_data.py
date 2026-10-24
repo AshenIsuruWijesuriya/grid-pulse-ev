@@ -241,7 +241,7 @@ def day_detail(day: pd.Timestamp, base: pd.DataFrame, cfg: dict, settings: Setti
     P, status = {}, {}
     for s in DETAIL_STRATEGIES:
         grid = sch.plan_grid(sig, prob.hours) if s != "uncontrolled" else None
-        r = sch.run_strategy(prob, s, grid, c["weights"])
+        r = sch.run_strategy(prob, s, grid, c["weights"], c.get("station_rule", "arrival_first"))
         status[s] = r["status"]
         if r["status"] not in ("optimal", "simulated"):
             return {"prob": prob, "P": {}, "status": status, "feasible": False, "settings": settings,
@@ -539,6 +539,8 @@ def assumptions(cfg: dict) -> pd.DataFrame:
             ("Station capacity (kW)", c["station_capacity_kw"], c.get("station_source", "")),
             ("Sessions per station per day", c["sessions_per_station_per_day"], c.get("station_source", "")),
             ("Declared-departure share", c["declared_departure_fraction"], "provisional"),
+            ("Station rule", c.get("station_rule", "arrival_first").replace("_", " "),
+             c.get("station_rule_source", "")),
             ("Objective weights", json.dumps(c["weights"]), "swept in SO5 (no single right weighting)"),
             ("Session source", cfg["sessions"]["source"], cfg["sessions"].get("source_note", ""))]
     out = pd.DataFrame(rows, columns=["Parameter", "Value", "Source"])

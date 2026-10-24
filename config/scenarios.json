@@ -81,6 +81,8 @@
     "station_capacity_kw": 50,
     "station_source": "provisional: 50 kW site connection shared by its charge points",
     "declared_departure_fraction": 0.8,
+    "station_rule": "arrival_first",
+    "station_rule_source": "arrival_first keeps FR10 (every car full); declared_first is swept in SO6 and awaits a decision",
     "kwh_per_km": 0.16,
     "forecast_scenarios": 20,
     "forecast_scenarios_source": "design choice: forecast + errors of the 20 nearest-date days of other months (sample average approximation); see results/experiments/robust_scenario_count.csv for 5-40",

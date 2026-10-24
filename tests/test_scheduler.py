@@ -175,3 +175,42 @@ def test_scenarios_only_for_curtailment_aware():
     prob = sch.day_problem(DAY, S, 1e6)
     with pytest.raises(ValueError):
         sch.run_strategy(prob, "solar_following", sch.plan_grid([_signal()], prob.hours), {})
+
+
+def _rule_case():
+    # One 5 kW station. The undeclared car (arrives 09:00, leaves 12:00) wants 10 kWh at 7 kW;
+    # the declared car (09:00-11:00) needs its full 4 kW for both hours.
+    return _sessions([(9, 12, 10.0, 7.0, 0, False), (9, 11, 8.0, 4.0, 0, True)])
+
+
+def test_arrival_first_reports_the_declared_car_infeasible():
+    S = _rule_case()
+    prob = sch.day_problem(DAY, S, 5.0)
+    r = sch.run_strategy(prob, "curtailment_aware", sch.plan_grid(_signal(), prob.hours),
+                         {"peak": 0.0, "delay": 0.0}, "arrival_first")
+    assert r["status"] == "infeasible"
+
+
+def test_declared_first_guarantees_declared_and_gives_undeclared_the_rest():
+    S = _rule_case()
+    prob = sch.day_problem(DAY, S, 5.0)
+    r = sch.run_strategy(prob, "curtailment_aware", sch.plan_grid(_signal(), prob.hours),
+                         {"peak": 0.0, "delay": 0.0}, "declared_first")
+    assert r["status"] == "optimal"
+    assert sch.audit_schedule(prob, r["P"], prob.declared)["total"] == 0     # incl. station limit
+    o = sch.session_outcomes(prob, r["P"])
+    assert o["completed"].tolist() == [False, True]
+    assert o.loc[0, "delivered_kwh"] == pytest.approx(1.0 * 2 + 5.0 * 1)     # 1 kW left, then all 5 kW
+    m = sch.evaluate([DAY], _signal(), sch.hourly_load_mw(prob, r["P"]), o, [], ["optimal"], [0.0], (17, 23))
+    assert m["undeclared_completion_rate"] == 0.0 and m["completion_rate"] == 0.5
+
+
+def test_rules_agree_when_capacity_is_ample():
+    S = _sessions([(9, 12, 10.0, 7.0, 0, False), (9, 16, 8.0, 4.0, 0, True)])
+    prob = sch.day_problem(DAY, S, 1e6)
+    grid, w = sch.plan_grid(_signal(), prob.hours), {"peak": 0.0, "delay": 0.0}
+    a = sch.run_strategy(prob, "curtailment_aware", grid, w, "arrival_first")["P"]
+    b = sch.run_strategy(prob, "curtailment_aware", grid, w, "declared_first")["P"]
+    assert np.allclose(a, b)
+    with pytest.raises(ValueError):
+        sch.run_strategy(prob, "curtailment_aware", grid, w, "first_come")

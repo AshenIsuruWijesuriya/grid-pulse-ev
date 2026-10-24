@@ -20,7 +20,7 @@ station capacity and session behaviour are still tagged `provisional` in
 | Scenario years | 2024 hourly shapes scaled by LTGEP base-case mid-year capacity (solar, wind, must-take) and net-generation forecast (demand) | Reference-year profile scaling, as in the LTGEP's own studies and Denholm & Margolis (2007) | `ltgep_scenario()` |
 | Sessions | GMM over arrival, dwell, energy fitted to ACN-Data; parametric fallback until data is obtained | ACN-Sim (Lee et al. 2021) provides GMM utilities; Monte Carlo sampling as in Ranathunga & Samaliarachchi (2017) | `ev_sessions.py` |
 | Uncontrolled baseline | Charge on arrival at max power | "Dumb" charging in Dixon et al. (2020) and ACN-Sim | `asap_profile()` |
-| Scheduler | LP, session + station constraints, 100% energy as a hard constraint, HiGHS | Time-coupled LP scheduling (Dixon et al. 2020; ACN-Sim offline optimal) | `solve_lp()` |
+| Scheduler | LP, session + station constraints, 100% energy as a hard constraint, HiGHS. Station rule: undeclared on-arrival load holds capacity first (`arrival_first`, central) or declared sessions do (`declared_first`, swept) | Time-coupled LP scheduling (Dixon et al. 2020; ACN-Sim offline optimal) | `solve_lp()` |
 | Curtailment term | Epigraph of max(0, ·) so absorbed MWh is exact in the LP | Standard LP reformulation | `solve_lp()` |
 | Forecast benchmark | Persistence: plan on yesterday's grid signal, score on today's | Standard naive benchmark (proposal Table 3.2) | `run_experiments.py` |
 | Planning under forecast error | One schedule against K = 20 grid scenarios: the day-ahead forecast plus the hourly forecast errors (all four targets from the same day) of the 20 nearest-date days in other months; minimise the scenario-average curtailment and peak. Checked for K = 5–40 and with errors from earlier months only | Sample average approximation of a stochastic programme (Shapiro et al. 2009); scenarios from empirical forecast errors (Morales et al. 2014) | `forecast_scenarios()`, `solve_lp_scenarios()` |
@@ -74,7 +74,12 @@ solved or computed, not trained.
 7. **Declared departures:** the most sensitive input. Infeasible days rise
    from 0 of 42 at 100% declaration to 3 at 80% and 20 at 50%, because
    undeclared drivers charging on arrival fill the shared station connection.
-   A station-level priority rule is a possible extension.
+   A station rule `declared_first` is implemented (`config station_rule`):
+   declared drivers are planned with the full connection and keep the
+   guarantee; undeclared drivers charge on arrival in what is left, with no
+   guarantee. It is swept in SO6 against the declared share. The central
+   setting stays `arrival_first` (every car full, FR10) until a decision is
+   made; results are in `so6_sensitivity.csv`.
 8. **2024 solar additions:** the LTGEP plan starts in 2025; 2024 additions are
    set to the plan's 2025 rate (200 MW). Multipliers change by less than 0.15
    for 0–400 MW.
