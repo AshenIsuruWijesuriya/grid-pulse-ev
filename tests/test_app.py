@@ -48,3 +48,22 @@ def test_plan_my_charge_reports_a_full_battery(app):
     text = " ".join(m.value for m in app.markdown)
     assert "You leave with **all 20.0 kWh** you asked for." in text
     assert app.metric[0].label == "Full by (smart charging)"
+
+
+def test_plan_a_day_can_add_the_forecast_error_plan(app):
+    app.switch_page("app_pages/plan_a_day.py").run()
+    app.toggle(key="plan_scenarios").set_value(True).run()
+    assert not app.exception, [e.value for e in app.exception]
+    options = app.dataframe[0].value["Option"].tolist()
+    assert "Smart charging, forecast with its errors" in options
+    app.toggle(key="plan_scenarios").set_value(False).run()
+
+
+def test_station_rule_changes_what_drivers_are_told(app):
+    app.session_state["rule"] = "declared_first"
+    app.switch_page("app_pages/drivers.py").run()
+    assert not app.exception, [e.value for e in app.exception]
+    assert any("may leave before they are full" in c.value for c in app.caption)
+    app.switch_page("app_pages/station.py").run()
+    assert not app.exception, [e.value for e in app.exception]
+    app.session_state["rule"] = "arrival_first"

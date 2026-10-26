@@ -185,3 +185,31 @@ def test_forecast_table():
     assert t["Chosen"].tolist() == ["Gradient boosting", "Ridge + weather forecast"]
     assert t["Better than tomorrow = today"].tolist() == pytest.approx([0.4, 0.2])
     assert np.isnan(t["Ridge + weather forecast"].iloc[0])          # demand has no weather model
+
+
+def test_settings_carry_the_station_rule():
+    cfg = _cfg()
+    s = dd.Settings.central(cfg)
+    assert s.station_rule == cfg["central"].get("station_rule", "arrival_first")
+    t = dd.Settings(s.scenario_year, s.nlmin_mw, s.snsp_max, s.sessions_per_day,
+                    s.declared_departure_fraction, s.weights, "declared_first")
+    assert t.apply(cfg)["central"]["station_rule"] == "declared_first"
+
+
+def test_evidence_facts_come_from_the_saved_tables():
+    sens = pd.DataFrame({
+        "dimension": ["NLmin (MW)"] * 2 + ["Declared departure share"] * 2 + ["Declared share, declared first rule"] * 2,
+        "value": [240, 240, 0.5, 0.5, 0.5, 0.5],
+        "strategy": ["uncontrolled", "curtailment_aware"] * 3,
+        "absorbed_mwh": [1.0, 2.0, 1.0, 2.0, 1.0, 3.0], "mean_evening_peak_increase_mw": [5, 3, 5, 3, 5, 2],
+        "days": [42, 42, 22, 22, 42, 42], "dropped_days": [0, 0, 20, 20, 0, 0],
+        "undeclared_completion_rate": [1.0, 1.0, 1.0, 1.0, 0.9, 0.9],
+        "curtailment_aware_not_outranked": [True, True, True, True, False, False],
+        "constraint_violations": [0, 0, 0, 1, 0, 0]})
+    assert dd.sensitivity_cases(sens) == (3, 2)
+    t = dd.station_rule_table(sens)
+    assert t["Rule"].tolist() == [dd.RULES["arrival_first"], dd.RULES["declared_first"]]
+    assert t["Days not possible"].tolist() == [20, 0] and t["Others leave full"].tolist() == [1.0, 0.9]
+    total, checked = dd.audit_violations({"sensitivity": sens, "weekly": pd.DataFrame()})
+    assert (total, checked) == (1, 6)
+    assert dd.station_rule_table(sens[sens["dimension"] != "Declared share, declared first rule"]).empty

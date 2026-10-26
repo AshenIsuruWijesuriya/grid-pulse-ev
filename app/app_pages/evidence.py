@@ -37,18 +37,29 @@ for col, (field, title, fmt, sub) in zip(cols, [
     with col:
         st.altair_chart(shared.style(shared.compare_bars(risk.loc[main], field, title, fmt, sub)))
 by_day = r["by_day"]
+smart, sunny = risk.loc["curtailment_aware"], risk.loc["solar_following"]
+pct = "evening_peak_reduction_pct_of_ev_increase"
+points = [f"Smart charging removes **{smart[pct]:.0f}%** of the evening peak that EVs add, against "
+          f"{sunny[pct]:.0f}% when charging when sunny, with **{smart['mean_delay_min']:.0f} minutes** of "
+          f"extra waiting instead of {sunny['mean_delay_min']:.0f}."]
 if not by_day.empty:
     diff = (by_day["curtailment_aware"] - by_day["solar_following"]).round(2)
     wins = by_day.loc[diff > 0.5, "day"].tolist()
-    st.markdown(
-        "- Smart charging removes about **twice as much** of the evening peak as charging when sunny, "
-        "with about **a third** of the waiting.\n"
-        f"- It uses at least as much clean power on every day. It uses **more** on "
-        f"{len(wins)} of {len(by_day)} days ({', '.join(pd.Timestamp(d).strftime('%d %b') for d in wins)}), "
-        "when monsoon wind moved the surplus away from the sunniest hour. On the other days the surplus "
-        "sits on the sunny hours, so both catch it.\n"
-        "- With a **forecast** instead of perfect knowledge, most of the peak benefit remains but some of "
-        "the clean-power benefit is lost.")
+    behind = int((diff < -0.5).sum())
+    points.append(
+        ("It uses at least as much clean power on every day. " if not behind else
+         f"It uses less clean power on {behind} of {len(by_day)} days. ")
+        + (f"It uses **more** on {len(wins)} of {len(by_day)} days "
+           f"({', '.join(pd.Timestamp(d).strftime('%d %b') for d in wins)}), when the surplus did not sit on "
+           "the sunniest hours (for example monsoon wind). On the other days both catch it."
+           if wins else "Both catch the same clean power, because the surplus sits on the sunny hours."))
+if "curtailment_aware_ml" in risk.index:
+    fc = risk.loc["curtailment_aware_ml"]
+    points.append(f"Planning on a **forecast** instead of perfect knowledge still removes {fc[pct]:.0f}% of "
+                  f"the evening peak (perfect knowledge: {smart[pct]:.0f}%) and uses {fc['absorbed_mwh']:,.0f} "
+                  f"instead of {smart['absorbed_mwh']:,.0f} MWh of clean power.")
+st.markdown("\n".join(f"- {p}" for p in points))
+if not by_day.empty:
     if {"curtailment_aware_ml", "curtailment_aware_robust"} <= set(risk.index):
         perfect, fc, rob = (risk.loc[s] for s in ("curtailment_aware", "curtailment_aware_ml",
                                                    "curtailment_aware_robust"))
@@ -64,22 +75,36 @@ if not by_day.empty:
                 f"{fc['mean_delay_min']:.0f}.")
 
 st.subheader("3. Is it robust?", icon=":material/verified:")
-lead = summ.get("so6_curtailment_aware_not_outranked_share")
 sens = r["sensitivity"]
-n_cases = len(sens.drop_duplicates(["dimension", "value"])) if not sens.empty else 0
+n_cases, n_lead = dd.sensitivity_cases(sens)
+breaks, checked = dd.audit_violations(r)
 with st.container(horizontal=True):
-    if lead is not None:
-        st.metric("Settings where smart charging is never beaten", f"{round(lead * n_cases)} of {n_cases}",
+    if n_cases:
+        st.metric("Settings where smart charging is never beaten", f"{n_lead} of {n_cases}",
                   "grid limits, years, driver behaviour", delta_color="off", border=True)
     if not r["scaling"].empty:
         ten = r["scaling"].set_index("sessions").loc[10000]
         st.metric("Time to plan 10,000 cars", f"{ten['total_s']:.1f} s", "requirement: under 60 s",
                   delta_color="off", border=True)
-    st.metric("Rule breaks found by the independent audit", "0", "every plan, every run", delta_color="off", border=True)
+    if checked:
+        st.metric("Rule breaks found by the independent audit", f"{breaks:,}",
+                  f"across {checked} saved results", delta_color="off", border=True)
 st.markdown("The study was repeated with a lower and higher safe minimum for the power stations, "
-            "different inertia limits, different years, and fewer drivers saying when they leave. Smart "
-            "charging never came out behind. The input that matters most is **how many drivers say when "
-            "they will leave**: below about 80%, some stations can no longer promise everyone a full battery.")
+            "different inertia limits, different years, and fewer drivers saying when they leave."
+            + (" Smart charging never came out behind." if n_cases and n_lead == n_cases else
+               f" Smart charging was never beaten in {n_lead} of {n_cases} settings."))
+rules = dd.station_rule_table(sens, shared.config()["central"].get("station_rule", "arrival_first"))
+if not rules.empty:
+    st.markdown("The input that matters most is **how many drivers say when they will leave**. Drivers who "
+                "do not say charge on arrival and can fill a station's shared connection. Two rules for who "
+                "charges first were compared on the weekly sample:")
+    st.dataframe(rules, hide_index=True, alt="Station rules compared by share of drivers who say when they leave",
+                 column_config={"Drivers who say when they leave": st.column_config.NumberColumn(format="percent"),
+                                "Others leave full": st.column_config.NumberColumn(format="percent"),
+                                "Clean power used (MWh)": st.column_config.NumberColumn(format="%.1f"),
+                                "Evening peak added (MW)": st.column_config.NumberColumn(format="%.2f")})
+    st.caption("Days not possible: some declared driver could not be given their full energy, so the day is "
+               "reported rather than planned. Others leave full: drivers who did not say when they leave.")
 if not r["tradeoff"].empty:
     st.altair_chart(shared.style(shared.tradeoff_chart(r["tradeoff"])))
 
@@ -147,15 +172,41 @@ if not fa.empty and fs:
                      f"{(1 - det['forecast_risk_mwh'] / det['actual_risk_mwh']) * 100:.0f}%.")
     st.caption(" ".join(notes))
 
+rk = r["robust_k"]
+if not rk.empty and "curtailment_aware_robust" in risk.index:
+    st.subheader("5. Planning for forecast errors", icon=":material/stacked_line_chart:")
+    st.markdown("A forecast is wrong in ways that repeat. Instead of trusting it, the scheduler can plan one "
+                "schedule against several versions of tomorrow: the forecast plus the errors it made on the "
+                "most similar days of other months. Every driver who said when they leave still leaves full.")
+    st.altair_chart(shared.style(shared.scenario_count_chart(rk)))
+    k_used = shared.config()["central"].get("forecast_scenarios", 20)
+    causal = rk[(rk["day_set"] == "risk days with past analogs") & (rk["scenarios"] == k_used)
+                & (rk["strategy"] == "curtailment_aware_robust")].set_index("past_months_only")
+    if {True, False} <= set(causal.index):
+        n_days = int(causal.loc[True, "days"])
+        st.markdown(f"Check for look-ahead: on the {n_days} risk days that have enough earlier days, taking the "
+                    f"errors only from **earlier months** gives {causal.loc[True, 'absorbed_mwh']:,.1f} MWh "
+                    f"and +{causal.loc[True, 'mean_evening_peak_increase_mw']:.2f} MW, against "
+                    f"{causal.loc[False, 'absorbed_mwh']:,.1f} MWh and "
+                    f"+{causal.loc[False, 'mean_evening_peak_increase_mw']:.2f} MW with errors from any other month.")
+    st.caption(f"The study uses {k_used} scenarios. Planning for errors costs waiting time, because the plan "
+               "spreads charging over every hour that might have spare clean power.")
+
 with st.expander("All result tables", icon=":material/table_chart:"):
     cols_ = list(dd.METRIC_COLUMNS)
     st.markdown("**Curtailment-risk days**")
-    st.dataframe(dd.metrics_for_display(r["risk_days"].set_index("strategy")[cols_]), alt="Risk-day results")
+    st.dataframe(dd.metrics_for_display(r["risk_days"].set_index("strategy").reindex(columns=cols_)),
+                 alt="Risk-day results")
     if not by_day.empty:
         st.markdown("**Clean power used per day (MWh)**")
         st.dataframe(by_day.rename(columns=shared.friendly).set_index("day"), alt="Per-day results")
     st.markdown("**Weekly sample of the whole year**")
-    st.dataframe(dd.metrics_for_display(r["weekly"].set_index("strategy")[cols_]), alt="Weekly-sample results")
+    st.dataframe(dd.metrics_for_display(r["weekly"].set_index("strategy").reindex(columns=cols_)),
+                 alt="Weekly-sample results")
+    if not r["robust_k"].empty:
+        st.markdown("**Planning for forecast errors: number of scenarios and past-only errors**")
+        st.dataframe(r["robust_k"].assign(strategy=r["robust_k"]["strategy"].map(shared.friendly)),
+                     hide_index=True, alt="Forecast-scenario planning by number of scenarios")
     if not sens.empty:
         st.markdown("**Sensitivity (clean power used, MWh)**")
         piv = sens.pivot_table(index=["dimension", "value"], columns="strategy", values="absorbed_mwh",

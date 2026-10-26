@@ -57,10 +57,12 @@ def days_for(settings: dd.Settings) -> pd.DataFrame:
 
 
 @st.cache_data(show_spinner=False, max_entries=48)
-def solve(day_iso: str, settings: dd.Settings) -> dict:
+def solve(day_iso: str, settings: dd.Settings, with_scenarios: bool = False) -> dict:
+    """The day under every option; with_scenarios adds planning on 20 forecast-error scenarios."""
     base, _ = inputs()
     p = pool(settings.sessions_per_day, settings.declared_departure_fraction)
-    return dd.solve_one_day(pd.Timestamp(day_iso, tz=dd.TZ), base, config(), settings, pool=p)
+    strategies = dd.DAY_STRATEGIES + (["curtailment_aware_robust"] if with_scenarios else [])
+    return dd.solve_one_day(pd.Timestamp(day_iso, tz=dd.TZ), base, config(), settings, strategies, pool=p)
 
 
 @st.cache_resource(show_spinner=False, max_entries=6)
@@ -108,7 +110,7 @@ def init_state() -> None:
     c = dd.Settings.central(config())
     defaults = {"choice": "Sunny Sunday", "other_day": None, "year": c.scenario_year,
                 "fleet": c.sessions_per_day, "nlmin": int(c.nlmin_mw), "snsp": c.snsp_max,
-                "declared": float(c.declared_departure_fraction),
+                "declared": float(c.declared_departure_fraction), "rule": c.station_rule,
                 "w_peak": c.weights["peak"], "w_delay": c.weights["delay"]}
     for k, v in defaults.items():
         st.session_state.setdefault(k, v)
@@ -117,7 +119,7 @@ def init_state() -> None:
 def settings() -> dd.Settings:
     s = st.session_state
     return dd.Settings(int(s.year), float(s.nlmin), s.snsp, int(s.fleet), float(s.declared),
-                       {"curtailment": 1.0, "peak": float(s.w_peak), "delay": float(s.w_delay)})
+                       {"curtailment": 1.0, "peak": float(s.w_peak), "delay": float(s.w_delay)}, s.rule)
 
 
 def _keep(name: str, key: str) -> None:
@@ -182,6 +184,12 @@ def advanced_settings() -> None:
             snsp = st.segmented_control("Inertia limit (SNSP)", list(snsp_opts), default=snsp_now)
             declared = st.slider("Share of drivers who say when they will leave", 0.5, 1.0,
                                  float(s.declared), step=0.05)
+            rule = st.segmented_control(
+                "When a station's connection is full, who charges first", list(dd.RULES),
+                default=s.rule, format_func=dd.RULES.get,
+                help="By default every car charges as it arrives and declared drivers are planned "
+                     "around them. The other rule plans declared drivers first; drivers who did not say "
+                     "when they leave then get what is left and may leave before they are full.")
             with st.container(horizontal=True):
                 w_peak = st.select_slider("Peak weight", [0.0, 0.25, 1.0, 4.0, 16.0], value=s.w_peak)
                 w_delay = st.select_slider("Waiting weight", [0.0, 0.01, 0.1], value=s.w_delay)
@@ -190,10 +198,10 @@ def advanced_settings() -> None:
                 reset = st.form_submit_button("Reset to the research defaults", icon=":material/restart_alt:")
         if applied:
             s.update(nlmin=nlmin, snsp=snsp_opts[snsp or snsp_now], declared=declared,
-                     w_peak=w_peak, w_delay=w_delay)
+                     rule=rule or s.rule, w_peak=w_peak, w_delay=w_delay)
             st.rerun()
         if reset:
-            for k in ("nlmin", "snsp", "declared", "w_peak", "w_delay"):
+            for k in ("nlmin", "snsp", "declared", "rule", "w_peak", "w_delay"):
                 del s[k]
             init_state()
             st.rerun()
@@ -201,6 +209,18 @@ def advanced_settings() -> None:
 
 def friendly(s: str) -> str:
     return dd.FRIENDLY.get(s, s)
+
+
+def undeclared_note(settings: dd.Settings) -> str:
+    """What happens to drivers who do not say when they leave, under the chosen station rule."""
+    share = f"{(1 - settings.declared_departure_fraction) * 100:.0f}%"
+    if settings.station_rule == "declared_first":
+        return (f"Drivers who do not say when they leave ({share} here) charge on arrival in whatever "
+                "connection capacity the plan leaves, so some may leave before they are full. Every driver "
+                "who said when they leave gets their full energy.")
+    return (f"Drivers who do not say when they leave ({share} here) always charge on arrival. Nobody is "
+            "ever cut short: if a plan cannot give every driver their full energy, the day is reported "
+            "as not possible.")
 
 
 # --------------------------------------------------------------------------- #
@@ -440,3 +460,24 @@ def tradeoff_chart(tr: pd.DataFrame) -> alt.Chart:
         height=280, title=_title("Cutting the evening peak costs a few minutes of waiting",
                                  f"Clean power used stays at {df['absorbed_mwh'].min():.1f} MWh at every "
                                  "setting; lines overlap where settings give the same result"))
+
+
+def scenario_count_chart(rk: pd.DataFrame) -> alt.Chart:
+    """Clean power used on the risk days against the number of forecast scenarios."""
+    df = rk[rk["day_set"] == "all risk days"].copy()
+    df["label"] = df["strategy"].map(friendly)
+    drawn = [s for s in ORDER if s in set(df["strategy"])]
+    enc = alt.Chart(df).encode(
+        x=alt.X("scenarios:Q", title="Forecast scenarios planned for", scale=alt.Scale(type="log", base=2),
+                axis=alt.Axis(values=sorted(df["scenarios"].unique()), format="d")),
+        y=alt.Y("absorbed_mwh:Q", title="Clean power used (MWh)", scale=alt.Scale(zero=False)),
+        color=alt.Color("label:N", title=None, scale=alt.Scale(
+            domain=[friendly(s) for s in drawn], range=[rx.COLORS[s] for s in drawn])))
+    pts = enc.mark_point(size=80, filled=True).encode(tooltip=[
+        alt.Tooltip("label:N", title="Option"), alt.Tooltip("scenarios:Q", title="Scenarios"),
+        alt.Tooltip("absorbed_mwh:Q", format=",.1f", title="Clean power used (MWh)"),
+        alt.Tooltip("mean_evening_peak_increase_mw:Q", format=".2f", title="Evening peak added (MW)"),
+        alt.Tooltip("mean_delay_min:Q", format=".0f", title="Average wait (min)")])
+    return (enc.mark_line(strokeWidth=2.5) + pts).properties(height=280, title=_title(
+        "How many versions of tomorrow are enough?",
+        "Risk days. Only the plan for forecast errors depends on the number; the other two lines are flat."))

@@ -37,6 +37,7 @@ METRIC_COLUMNS = {
     "completion_rate": "Completion",
     "mean_delay_min": "Mean delay (min)",
     "p95_delay_min": "p95 delay (min)",
+    "undeclared_completion_rate": "Undeclared cars full",
     "constraint_violations": "Violations",
     "solver_s_total": "Solve time (s)",
 }
@@ -79,12 +80,14 @@ class Settings:
     sessions_per_day: int
     declared_departure_fraction: float
     weights: dict = field(default_factory=dict)
+    station_rule: str = "arrival_first"
 
     @classmethod
     def central(cls, cfg: dict) -> "Settings":
         c = cfg["central"]
         return cls(c["scenario_year"], c["nlmin_mw"], c["snsp_max"], c["sessions_per_day"],
-                   c["declared_departure_fraction"], dict(c["weights"]))
+                   c["declared_departure_fraction"], dict(c["weights"]),
+                   c.get("station_rule", "arrival_first"))
 
     def apply(self, cfg: dict) -> dict:
         """A copy of `cfg` with these settings as the central case."""
@@ -92,7 +95,8 @@ class Settings:
         c = out["central"]
         c.update(scenario_year=self.scenario_year, nlmin_mw=self.nlmin_mw, snsp_max=self.snsp_max,
                  sessions_per_day=self.sessions_per_day,
-                 declared_departure_fraction=self.declared_departure_fraction)
+                 declared_departure_fraction=self.declared_departure_fraction,
+                 station_rule=self.station_rule)
         c["weights"] = {**c["weights"], **self.weights}
         return out
 
@@ -147,6 +151,12 @@ def solve_one_day(day: pd.Timestamp, base: pd.DataFrame, cfg: dict, settings: Se
             strategies.remove("curtailment_aware_ml")
         else:
             plans["_ml"] = ml
+    if "curtailment_aware_robust" in strategies:
+        sc = rx.forecast_scenarios(base, run_cfg)
+        if sc is None:
+            strategies.remove("curtailment_aware_robust")
+        else:
+            plans["_robust"] = sc
     sessions, in_pool = _day_sessions(day, run_cfg, pool)
     res = rx.run_case([day], sessions, sig, run_cfg, strategies, c["weights"],
                       c["station_capacity_kw"], plans)
@@ -383,6 +393,7 @@ def station_view(detail: dict, station_id: int) -> dict:
         "Energy (kWh)": prob.energy[order],
         "Charger (kW)": prob.pmax[order],
         "Said when leaving": prob.declared[order],
+        "Delivered, smart (kWh)": P["curtailment_aware"][order].sum(axis=1) * sch.STEP_HOURS,
         **{f"Full by: {FRIENDLY[s]}": [_finish(prob, P[s][i]) for i in order] for s in DETAIL_STRATEGIES},
     })
     totals = pd.DataFrame({s: P[s][order].sum(axis=0) for s in DETAIL_STRATEGIES}, index=prob.slots)
@@ -463,8 +474,10 @@ def export_summary(day: pd.Timestamp, settings: Settings, out: dict, verdict_: d
 
 def metrics_for_display(metrics: pd.DataFrame) -> pd.DataFrame:
     out = metrics.rename(columns=METRIC_COLUMNS).copy()
-    if "Completion" in out:
-        out["Completion"] = (out["Completion"].astype(float) * 100).round(2).astype(str) + "%"
+    for col in ("Completion", "Undeclared cars full"):
+        if col in out:
+            v = pd.to_numeric(out[col], errors="coerce") * 100
+            out[col] = v.map(lambda x: "" if pd.isna(x) else f"{x:.2f}%")
     out.index = [rx.LABELS.get(i, i) for i in out.index]
     return out
 
@@ -485,6 +498,8 @@ def experiment_results() -> dict:
                       ("sensitivity", "so6_sensitivity.csv"), ("scaling", "scaling_benchmark.csv")):
         p = out_dir / name
         out[key] = pd.read_csv(p) if p.is_file() else pd.DataFrame()
+    p = out_dir / "robust_scenario_count.csv"
+    out["robust_k"] = pd.read_csv(p) if p.is_file() else pd.DataFrame()
     p = out_dir / "run_summary.json"
     out["summary"] = json.loads(p.read_text(encoding="utf-8")) if p.is_file() else {}
     p = PROJECT_ROOT / "results/grid_scenario/grid_base_2024_diagnostics.json"
@@ -511,6 +526,49 @@ FORECAST_TARGETS = {"demand_system_mw": "Demand", "solar_available_mw": "Solar",
 FORECAST_MODELS = {"persistence": "Tomorrow = today", "seasonal_naive": "Same day last week",
                    "ridge": "Ridge regression", "gbm": "Gradient boosting",
                    "ridge_nwp": "Ridge + weather forecast", "gbm_nwp": "Gradient boosting + weather forecast"}
+
+
+def audit_violations(results: dict) -> tuple[int, int]:
+    """Rule breaks found by the independent audit across the saved runs: (total, results checked)."""
+    total = checked = 0
+    for key in ("risk_days", "weekly", "tradeoff", "sensitivity", "robust_k"):
+        t = results.get(key, pd.DataFrame())
+        if "constraint_violations" in t:
+            total += int(t["constraint_violations"].sum())
+            checked += len(t)
+    return total, checked
+
+
+def sensitivity_cases(sens: pd.DataFrame) -> tuple[int, int]:
+    """(settings tested, settings where smart charging is never outranked)."""
+    if sens.empty:
+        return 0, 0
+    cases = sens.drop_duplicates(["dimension", "value"])
+    return len(cases), int(cases["curtailment_aware_not_outranked"].fillna(False).astype(bool).sum())
+
+
+def station_rule_table(sens: pd.DataFrame, rule_default: str = "arrival_first") -> pd.DataFrame:
+    """Smart charging by declared share under each station rule: days planned and who leaves full."""
+    if sens.empty:
+        return pd.DataFrame()
+    shares = sens[sens["dimension"].str.startswith("Declared")
+                  & (sens["strategy"] == "curtailment_aware")].copy()
+    if shares["dimension"].nunique() < 2:
+        return pd.DataFrame()
+    other = "declared_first" if rule_default == "arrival_first" else "arrival_first"
+    shares["Rule"] = np.where(shares["dimension"] == "Declared departure share",
+                              RULES[rule_default], RULES[other])
+    keep = {"Rule": "Rule", "value": "Drivers who say when they leave", "days": "Days planned",
+            "dropped_days": "Days not possible", "absorbed_mwh": "Clean power used (MWh)",
+            "mean_evening_peak_increase_mw": "Evening peak added (MW)"}
+    if "undeclared_completion_rate" in shares:
+        keep["undeclared_completion_rate"] = "Others leave full"
+    return shares[list(keep)].rename(columns=keep).reset_index(drop=True)
+
+
+# Plain names for the station rules (Expert settings, Evidence).
+RULES = {"arrival_first": "Every car as it arrives (research default)",
+         "declared_first": "Drivers who say when they leave come first"}
 
 
 def forecast_table(accuracy: pd.DataFrame, selected: dict) -> pd.DataFrame:

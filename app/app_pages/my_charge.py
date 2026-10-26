@@ -38,7 +38,8 @@ except ValueError as err:
 
 if not mc["feasible"]:
     st.error("With these settings the chargers cannot give every driver their full energy in time, so this "
-             "day is reported as not possible. Try another day or fewer cars.", icon=":material/block:")
+             "day is reported as not possible. Try another day, fewer cars, or the station rule in Expert "
+             "settings on the Plan a day page.", icon=":material/block:")
     st.stop()
 
 day = pd.Timestamp(day_iso, tz=dd.TZ)
@@ -95,4 +96,4 @@ st.altair_chart(shared.style(shared.driver_chart(example, out["window"]).propert
                         "Lighter blocks: below full charger power."))))
 st.caption(f"Your car joined station {mc['station_id']}, the least busy that day, which shares a "
            f"{shared.config()['central']['station_capacity_kw']:g} kW connection with its other cars. "
-           "Nobody else is cut short to fit you in: if that were needed, the day would be reported as not possible.")
+           "You said when you leave, so your energy is guaranteed. " + shared.undeclared_note(settings))

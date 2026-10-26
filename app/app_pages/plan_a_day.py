@@ -9,16 +9,21 @@ st.caption("Pick a real day and a future year. The scheduler plans every car's c
            "live, and compares it with what happens today.")
 
 day_iso, settings = shared.picker("plan")
+with_scenarios = st.toggle(
+    "Also plan for forecast errors", key="plan_scenarios",
+    help="Adds smart charging that only knows tomorrow's forecast and how wrong such forecasts have been "
+         "on 20 similar past days, and makes one plan that works across them. Takes a few seconds more.")
 shared.advanced_settings()
 
 with st.spinner(f"Planning {settings.sessions_per_day:,} charging sessions for each option..."):
-    out = shared.solve(day_iso, settings)
+    out = shared.solve(day_iso, settings, with_scenarios)
 day = pd.Timestamp(day_iso)
 
 if out["dropped"]:
     st.error("With these settings the chargers cannot give every driver who said when they are leaving "
              "their full energy in time, so this day is reported as not possible rather than cutting "
-             "anyone short. Try more drivers who say when they leave, or fewer cars.",
+             "anyone short. Try more drivers who say when they leave, fewer cars, or, in Expert settings, "
+             "letting drivers who say when they leave charge first.",
              title="This day cannot be planned", icon=":material/block:")
     st.stop()
 
@@ -77,7 +82,8 @@ st.dataframe(table, hide_index=True, alt="Comparison of charging options for the
 same = ("the same sessions as the saved full-year study" if out["experiment_sessions"]
         else "sessions drawn for this day only")
 st.caption(f"{out['sessions']:,} charging sessions ({same}). Every plan is re-checked by an independent "
-           "audit: no charger over its limit, no car charged while unplugged, every promised kWh delivered.")
+           "audit: no charger over its limit, no car charged while unplugged, every promised kWh delivered. "
+           + shared.undeclared_note(settings))
 
 with st.expander("Download the results", icon=":material/download:"):
     st.caption("Plain CSV and JSON in the format described in docs/export_schema.md. Times are the start "

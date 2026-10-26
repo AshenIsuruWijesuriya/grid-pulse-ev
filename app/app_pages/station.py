@@ -13,8 +13,8 @@ with st.spinner("Planning the day..."):
     d = shared.detail(day_iso, settings)
     out = shared.solve(day_iso, settings)
 if not d["feasible"]:
-    st.warning("This day cannot be planned with these settings. Pick another day or change the settings on "
-               "the Plan a day page.", icon=":material/block:")
+    st.warning("This day cannot be planned with these settings. Pick another day or change the Expert "
+               "settings on the Plan a day page.", icon=":material/block:")
     st.stop()
 
 ids = dd.station_ids(d)
@@ -29,7 +29,9 @@ with st.container(horizontal=True):
               delta_color="off", border=True)
     st.metric("Highest station power, smart charging", f"{view['peak_kw']['curtailment_aware']:.1f} kW",
               f"limit {view['capacity_kw']:g} kW", delta_color="off", border=True)
-    st.metric("Energy delivered", f"{cars['Energy (kWh)'].sum():,.1f} kWh", "every car full",
+    full = int((cars["Delivered, smart (kWh)"] >= cars["Energy (kWh)"] - 1e-3).sum())
+    st.metric("Energy delivered, smart charging", f"{cars['Delivered, smart (kWh)'].sum():,.1f} kWh",
+              "every car full" if full == len(cars) else f"{full} of {len(cars)} cars full",
               delta_color="off", border=True)
 
 st.altair_chart(shared.style(shared.station_power_chart(view, out["window"])))
@@ -47,6 +49,7 @@ for col in table.columns:
         table[col] = pd.DatetimeIndex(table[col]).strftime("%H:%M")
 st.dataframe(table, hide_index=True, alt=f"Cars at station {station}",
              column_config={"Energy (kWh)": st.column_config.NumberColumn(format="%.1f"),
+                            "Delivered, smart (kWh)": st.column_config.NumberColumn(format="%.1f"),
                             "Charger (kW)": st.column_config.NumberColumn(format="%.1f")})
-st.caption("Cars that do not say when they leave always charge on arrival; the scheduler plans the others "
-           "around them. Stations are a model: sessions are spread across stations at random.")
+st.caption(shared.undeclared_note(settings) + " Stations are a model: sessions are spread across stations "
+           "at random.")

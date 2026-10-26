@@ -15,7 +15,7 @@ with st.spinner("Planning the day and picking typical drivers..."):
 
 if not examples:
     st.warning("This day cannot be planned with these settings, so there are no drivers to show. "
-               "Pick another day or change the settings on the Plan a day page.", icon=":material/block:")
+               "Pick another day or change the Expert settings on the Plan a day page.", icon=":material/block:")
     st.stop()
 
 for e in examples:
@@ -39,6 +39,4 @@ for e in examples:
         st.caption(f"A typical driver in this group: the middle one of the {e['group_moved']:,} of "
                    f"{e['group_size']:,} drivers whose charging time smart charging moves.")
 
-st.caption(f"Drivers who do not say when they leave ({(1 - settings.declared_departure_fraction) * 100:.0f}% "
-           "here) always charge on arrival. Nobody is ever cut short: if a plan cannot give every driver "
-           "their full energy, the day is reported as not possible.")
+st.caption(shared.undeclared_note(settings))

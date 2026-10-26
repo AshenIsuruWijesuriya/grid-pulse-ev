@@ -114,7 +114,7 @@ def asap_profile(prob: DayProblem, mask: np.ndarray,
         load = np.bincount(prob.station[idx], weights=want, minlength=n_st)
         avail = prob.station_capacity_kw - (0 if fixed_station_kw is None else fixed_station_kw[:, t])
         scale = np.ones(n_st)
-        np.divide(np.clip(avail, 0, None), load, out=scale, where=load > avail)
+        np.divide(np.clip(avail, 0, None), load, out=scale, where=(load > avail) & (load > 0))
         p = want * np.clip(scale, 0, 1)[prob.station[idx]]
         P[idx, t] = p
         rem[idx] -= p * STEP_HOURS

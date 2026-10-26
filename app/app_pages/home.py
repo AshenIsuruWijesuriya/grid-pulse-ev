@@ -47,7 +47,6 @@ if risk is None:
 else:
     smart, unc, sunny = (risk.loc[s] for s in ("curtailment_aware", "uncontrolled", "solar_following"))
     summ = r["summary"]
-    lead = summ.get("so6_curtailment_aware_not_outranked_share")
     n_days = len(summ.get("risk_days", []))
     year = summ.get("scenario", {}).get("scenario_year", 2028)
     per_day = int(smart["sessions"]) // max(n_days, 1)
@@ -87,8 +86,9 @@ else:
             "Cars full": f"{x['completion_rate'] * 100:.2f}%"}
             for s, x in (("uncontrolled", unc), ("solar_following", sunny), ("curtailment_aware", smart))]),
             hide_index=True)
-        if lead is not None:
-            st.caption(f"Smart charging was never beaten in {round(lead * 16)} of 16 tested settings. "
+        n_cases, n_lead = dd.sensitivity_cases(r["sensitivity"])
+        if n_cases:
+            st.caption(f"Smart charging was never beaten in {n_lead} of {n_cases} tested settings. "
                        "Full details on the Evidence page.")
 
 st.space("medium")
