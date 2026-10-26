@@ -602,24 +602,36 @@ def main() -> None:
             plot_tradeoff(tradeoff, out / "figures/so5_tradeoff.png")
 
         if "_robust" in plans:
-            # Scenario planning: number of scenarios, and errors from past months only.
+            # Scenario planning: number of scenarios on every risk day; and, on the risk
+            # days that have enough earlier days for every count, errors from other
+            # months against errors from earlier months only (same days for both).
+            kmax = max(sw["forecast_scenarios"])
+            causal = forecast_scenarios(base, cfg, kmax, past_only=True)
+            causal_days = [d for d in risk_days if all(
+                s.loc[d: d + pd.offsets.Day(2), "net_load_mw"].notna().all() for s in causal)]
+            runs_k = [(k, "all risk days", risk_days, False) for k in sw["forecast_scenarios"]]
+            runs_k += [(k, "risk days with past analogs", causal_days, past)
+                       for k in sw["forecast_scenarios"] for past in (False, True)]
             rows = []
-            for k in sw["forecast_scenarios"]:
-                for past in (False, True):
-                    r = run_case(risk_days, sessions, central_signal, cfg,
-                                 ["uncontrolled", "curtailment_aware_robust"], c["weights"],
-                                 c["station_capacity_kw"],
-                                 {"_robust": forecast_scenarios(base, cfg, k, past_only=past)}, pool)
-                    m = r["metrics"].get("curtailment_aware_robust")
+            for k, day_set, days_k, past in runs_k:
+                r = run_case(days_k, sessions, central_signal, cfg,
+                             ["uncontrolled", "curtailment_aware", "curtailment_aware_ml",
+                              "curtailment_aware_robust"], c["weights"], c["station_capacity_kw"],
+                             {"_ml": plans["_ml"],
+                              "_robust": forecast_scenarios(base, cfg, k, past_only=past)}, pool)
+                for s in ("curtailment_aware", "curtailment_aware_ml", "curtailment_aware_robust"):
+                    m = r["metrics"].get(s)
                     if m:
-                        rows.append({"scenarios": k, "past_months_only": past, **{f: m[f] for f in (
-                            "absorbed_mwh", "mean_evening_peak_increase_mw",
-                            "evening_peak_reduction_pct_of_ev_increase", "mean_delay_min",
-                            "p95_delay_min", "completion_rate", "constraint_violations",
-                            "solver_s_total")}, "days": m["days"],
-                            "dropped_days": len(r["dropped_days"])})
-                    print(f"scenarios k={k} past_only={past} done")
+                        rows.append({"scenarios": k, "day_set": day_set, "past_months_only": past,
+                                     "strategy": s, **{f: m[f] for f in (
+                                         "absorbed_mwh", "mean_evening_peak_increase_mw",
+                                         "evening_peak_reduction_pct_of_ev_increase", "mean_delay_min",
+                                         "p95_delay_min", "completion_rate", "constraint_violations",
+                                         "solver_s_total")}, "days": m["days"],
+                                     "dropped_days": len(r["dropped_days"])})
+                print(f"scenarios k={k} {day_set} past_only={past} done")
             pd.DataFrame(rows).to_csv(out / "robust_scenario_count.csv", index=False)
+            summary["robust_past_analog_days"] = [str(d.date()) for d in causal_days]
 
         base_rank = None
         sens_rows = []
